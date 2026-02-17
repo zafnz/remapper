@@ -1,10 +1,7 @@
 *.dylib
 *.o
 build/
-hardened_test
-test_interpose
-spawn_hardened 
-verify_test_interpose 
-remapper
+.claude/
+.DS_Store
 
 

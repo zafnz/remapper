@@ -514,9 +514,46 @@ done:
     return result;
 }
 
-/*** Interposed exec/spawn functions **************/
+/*** PATH resolution for *p variants **************/
 
-#include <spawn.h>
+// Resolve a bare filename via $PATH. If `file` contains '/', copy it
+// directly. Otherwise walk $PATH looking for an executable match.
+// Returns 1 on success (result in `out`), 0 on failure.
+static int resolve_in_path(const char *file, char *out, size_t outsize) {
+    if (!file || !file[0]) return 0;
+
+    // If it contains '/', treat as a path — just copy it
+    if (strchr(file, '/')) {
+        if (strlen(file) >= outsize) return 0;
+        strcpy(out, file);
+        return 1;
+    }
+
+    const char *path_env = getenv("PATH");
+    if (!path_env) return 0;
+
+    char *path_copy = strdup(path_env);
+    if (!path_copy) return 0;
+
+    char *saveptr = NULL;
+    char *dir = strtok_r(path_copy, ":", &saveptr);
+    while (dir) {
+        size_t needed = strlen(dir) + 1 + strlen(file) + 1;
+        if (needed <= outsize) {
+            snprintf(out, outsize, "%s/%s", dir, file);
+            if (access(out, X_OK) == 0) {
+                free(path_copy);
+                return 1;
+            }
+        }
+        dir = strtok_r(NULL, ":", &saveptr);
+    }
+
+    free(path_copy);
+    return 0;
+}
+
+/*** Interposed exec/spawn functions **************/
 
 static int my_posix_spawn(pid_t *pid, const char *path,
                           const posix_spawn_file_actions_t *fa,
@@ -538,9 +575,23 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
                            const posix_spawn_file_actions_t *fa,
                            const posix_spawnattr_t *sa,
                            char *const argv[], char *const envp[]) {
-    // posix_spawnp does PATH lookup — we can't easily resolve, just log
-    if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] posix_spawnp: %s\n", file);
+    char resolved_path[PATH_MAX];
+    if (resolve_in_path(file, resolved_path, sizeof(resolved_path))) {
+        const char *actual = resolve_spawn_path(resolved_path);
+        if (actual != resolved_path) {
+            // Hardened resolution changed the path — use posix_spawn with full path
+            if (g_debug) {
+                fprintf(g_debug_fp, "[remapper] posix_spawnp: %s → %s (hardened)\n", file, actual);
+                fflush(g_debug_fp);
+            }
+            return posix_spawn(pid, actual, fa, sa, argv, envp);
+        }
+        if (g_debug) {
+            fprintf(g_debug_fp, "[remapper] posix_spawnp: %s (resolved: %s)\n", file, resolved_path);
+            fflush(g_debug_fp);
+        }
+    } else if (g_debug) {
+        fprintf(g_debug_fp, "[remapper] posix_spawnp: %s (unresolved)\n", file);
         fflush(g_debug_fp);
     }
     return posix_spawnp(pid, file, fa, sa, argv, envp);
@@ -574,8 +625,23 @@ static int my_execv(const char *path, char *const argv[]) {
 DYLD_INTERPOSE(my_execv, execv)
 
 static int my_execvp(const char *file, char *const argv[]) {
-    if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] execvp: %s\n", file);
+    char resolved_path[PATH_MAX];
+    if (resolve_in_path(file, resolved_path, sizeof(resolved_path))) {
+        const char *actual = resolve_spawn_path(resolved_path);
+        if (actual != resolved_path) {
+            // Hardened resolution changed the path — use execv with full path
+            if (g_debug) {
+                fprintf(g_debug_fp, "[remapper] execvp: %s → %s (hardened)\n", file, actual);
+                fflush(g_debug_fp);
+            }
+            return execv(actual, argv);
+        }
+        if (g_debug) {
+            fprintf(g_debug_fp, "[remapper] execvp: %s (resolved: %s)\n", file, resolved_path);
+            fflush(g_debug_fp);
+        }
+    } else if (g_debug) {
+        fprintf(g_debug_fp, "[remapper] execvp: %s (unresolved)\n", file);
         fflush(g_debug_fp);
     }
     return execvp(file, argv);

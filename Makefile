@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -O2
 BUILD   = build
 
-all: $(BUILD)/interpose.dylib $(BUILD)/remapper $(BUILD)/test_interpose $(BUILD)/verify_test_interpose
+all: $(BUILD)/interpose.dylib $(BUILD)/remapper $(BUILD)/test_interpose $(BUILD)/verify_test_interpose $(BUILD)/hardened_test $(BUILD)/spawn_hardened
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -22,15 +22,15 @@ $(BUILD)/test_interpose: test_interpose.c | $(BUILD)
 $(BUILD)/verify_test_interpose: verify_test_interpose.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $<
 
+$(BUILD)/hardened_test: hardened_test.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $<
+	codesign --force -s - --options runtime $@
+
+$(BUILD)/spawn_hardened: spawn_hardened.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $<
+
 test: all
-	@TMPDIR=$$(mktemp -d) && \
-	echo "--- Running test_interpose under interposer ---" && \
-	$(BUILD)/remapper "$$TMPDIR" "$$HOME/.dummy*" -- $(BUILD)/test_interpose && \
-	echo "" && \
-	echo "--- Running verify_test_interpose (no interposer) ---" && \
-	$(BUILD)/verify_test_interpose "$$TMPDIR" "$$HOME" && \
-	rm -rf "$$TMPDIR" && \
-	echo "--- All tests passed ---"
+	./test.sh
 
 clean:
 	rm -rf $(BUILD)
