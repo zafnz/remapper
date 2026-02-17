@@ -11,9 +11,16 @@ Now `claude-personal` and `claude-work` each get their own separate `~/.claude/`
 
 ## Install
 
+**macOS**
 ```bash
 mkdir -p ~/.local/bin && curl -L -o ~/.local/bin/remapper \
-    https://github.com/zafnz/remapper/releases/latest/download/remapper-macos-arm64 \
+    https://github.com/zafnz/remapper/releases/latest/download/remapper-Darwin-arm64 \
+    && chmod +x ~/.local/bin/remapper
+```
+**Linux (x86_64 / arm64)**
+```bash
+mkdir -p ~/.local/bin && curl -L -o ~/.local/bin/remapper \
+    https://github.com/zafnz/remapper/releases/latest/download/remapper-Linux-x86_64 \
     && chmod +x ~/.local/bin/remapper
 ```
 

@@ -1,6 +1,7 @@
 *.dylib
 *.o
 build/
+release/
 .claude/
 .DS_Store
 

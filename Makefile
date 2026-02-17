@@ -14,7 +14,9 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O2
 BUILD   = build
+RELEASE = release
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 
 SHARED_HDR     = rmp_shared.h
 INTERPOSE_HDR  = interpose.h $(SHARED_HDR)
@@ -25,7 +27,7 @@ INTERPOSE_HDR  = interpose.h $(SHARED_HDR)
 
 ifeq ($(UNAME_S),Darwin)
 
-all: $(BUILD)/interpose.dylib $(BUILD)/remapper
+all: $(BUILD)/interpose.dylib $(BUILD)/remapper $(RELEASE)/remapper-$(UNAME_S)-$(UNAME_M)
 
 INTERPOSE_SRC = interpose.c interpose_fs_darwin.c interpose_exec_darwin.c
 
@@ -42,7 +44,7 @@ test: all
 
 else ifeq ($(UNAME_S),Linux)
 
-all: $(BUILD)/remapper
+all: $(BUILD)/remapper $(RELEASE)/remapper-$(UNAME_S)-$(UNAME_M)
 
 INTERPOSE_SRC_LINUX = interpose.c interpose_fs_linux.c interpose_exec_linux.c
 
@@ -75,13 +77,20 @@ endif
 $(BUILD):
 	mkdir -p $(BUILD)
 
+$(RELEASE):
+	mkdir -p $(RELEASE)
+
+$(RELEASE)/remapper-$(UNAME_S)-$(UNAME_M): $(BUILD)/remapper | $(RELEASE)
+	cp $(BUILD)/remapper $@
+
 $(BUILD)/rmp_shared.o: rmp_shared.c $(SHARED_HDR) | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ rmp_shared.c
 
 deploy:
-	./deploy.sh $(VERSION)
+	./deploy-from-macos.sh $(VERSION)
 
 clean:
 	rm -rf $(BUILD)
+	rm -f $(RELEASE)/remapper-$(UNAME_S)-$(UNAME_M)
 
 .PHONY: all clean test deploy

@@ -1,13 +1,14 @@
 #!/bin/bash
 #
-# deploy.sh - Tag, push, create a GitHub release, and upload the binary.
+# deploy-from-macos.sh - Build macOS (and optionally Linux via Docker),
+#                        tag, push, and create a GitHub release.
 #
 # Usage:
-#   ./deploy.sh                    # auto-increment patch version (v0.0.1 → v0.0.2)
-#   ./deploy.sh v1.2.3             # use an explicit version
-#   ./deploy.sh --docker-linux     # also build and include Linux binary via Docker
-#   ./deploy.sh --docker-linux v1.2.3
-#   ./deploy.sh --dry-run          # build everything but skip tagging and release creation
+#   ./deploy-from-macos.sh                    # auto-increment patch version
+#   ./deploy-from-macos.sh v1.2.3             # use an explicit version
+#   ./deploy-from-macos.sh --docker-linux     # also build Linux binary via Docker
+#   ./deploy-from-macos.sh --docker-linux v1.2.3
+#   ./deploy-from-macos.sh --dry-run          # build everything but skip tagging and release
 #
 # Prerequisites:
 #   - Clean working tree (everything committed and pushed)
@@ -43,30 +44,32 @@ for arg in "$@"; do
 done
 set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 
-########################################
-# 1. Ensure working tree is clean
-########################################
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    die "Working tree has uncommitted changes. Commit or stash them first."
-fi
+if [ "$DRY_RUN" -eq 0 ]; then
+    ########################################
+    # 1. Ensure working tree is clean
+    ########################################
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        die "Working tree has uncommitted changes. Commit or stash them first."
+    fi
 
-if [ -n "$(git ls-files --others --exclude-standard)" ]; then
-    die "There are untracked files. Commit or remove them first."
-fi
+    if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+        die "There are untracked files. Commit or remove them first."
+    fi
 
-########################################
-# 2. Ensure we're pushed to remote
-########################################
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-REMOTE_REF=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
-LOCAL_REF=$(git rev-parse HEAD)
+    ########################################
+    # 2. Ensure we're pushed to remote
+    ########################################
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    REMOTE_REF=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
+    LOCAL_REF=$(git rev-parse HEAD)
 
-if [ -z "$REMOTE_REF" ]; then
-    die "Branch '$BRANCH' has no upstream. Push it first: git push -u origin $BRANCH"
-fi
+    if [ -z "$REMOTE_REF" ]; then
+        die "Branch '$BRANCH' has no upstream. Push it first: git push -u origin $BRANCH"
+    fi
 
-if [ "$LOCAL_REF" != "$REMOTE_REF" ]; then
-    die "Local branch is ahead of or behind origin/$BRANCH. Push or pull first."
+    if [ "$LOCAL_REF" != "$REMOTE_REF" ]; then
+        die "Local branch is ahead of or behind origin/$BRANCH. Push or pull first."
+    fi
 fi
 
 ########################################
@@ -106,65 +109,41 @@ fi
 
 info "Version: $NEW_VERSION"
 
+RELEASE="release"
+
 ########################################
-# 4. Build the macOS binary
+# 4. Build release assets
 ########################################
+rm -rf "$RELEASE"
+
+# 4a. Build macOS binary
 info "Building macOS binary..."
 make clean
 make
 
-if [ ! -f "$BINARY" ]; then
-    die "Build failed: $BINARY not found."
-fi
-
-# Determine architecture for the release asset name
-ARCH=$(uname -m)
-MACOS_ASSET="$BUILD/remapper-macos-${ARCH}"
-cp "$BINARY" "$MACOS_ASSET"
-
-info "Built: $MACOS_ASSET ($(du -h "$MACOS_ASSET" | cut -f1 | xargs))"
-
-ASSETS=("$MACOS_ASSET#remapper (macOS $ARCH)")
-
-########################################
-# 4b. Build the Linux binary (optional)
-########################################
+# 4b. Build Linux amd64 binary via Docker (optional)
 if [ "$DOCKER_LINUX" -eq 1 ]; then
-    info "Building Linux binary via Docker..."
-
-    LINUX_ARCH=$(docker run --rm ubuntu:24.04 uname -m)
-    LINUX_ASSET="$BUILD/remapper-linux-${LINUX_ARCH}"
-
-    docker run --rm -v "$(pwd)":/src -w /src ubuntu:24.04 bash -c '
+    info "Building Linux amd64 binary via Docker..."
+    docker run --rm --platform linux/amd64 -v "$(pwd)":/src -w /src ubuntu:24.04 bash -c '
         apt-get update -qq && apt-get install -y -qq gcc make binutils >/dev/null 2>&1
         make clean && make' || die "Linux Docker build failed."
 
-    if [ ! -f "$BINARY" ]; then
-        die "Linux build failed: $BINARY not found."
-    fi
-
-    cp "$BINARY" "$LINUX_ASSET"
-    info "Built: $LINUX_ASSET ($(du -h "$LINUX_ASSET" | cut -f1 | xargs))"
-
-    ASSETS+=("$LINUX_ASSET#remapper (Linux $LINUX_ARCH)")
-
     # Rebuild macOS so the local build dir is back to native
-    info "Rebuilding macOS binary..."
+    info "Rebuilding macOS binary (restoring native build)..."
     make clean
     make
-    cp "$BINARY" "$MACOS_ASSET"
 fi
 
+# Collect all release assets
+ASSETS=()
+for asset in "$RELEASE"/remapper-*; do
+    [ -f "$asset" ] || die "No release assets found in $RELEASE/"
+    OS_ARCH="${asset#$RELEASE/remapper-}"
+    info "Built: $asset ($(du -h "$asset" | cut -f1 | xargs))"
+    ASSETS+=("$asset#remapper ($OS_ARCH)")
+done
+
 if [ "$DRY_RUN" -eq 1 ]; then
-    info "Dry run complete. Built assets:"
-    for asset in "${ASSETS[@]}"; do
-        info "  ${asset%%#*}"
-        if [ -f "${asset%%#*}" ]; then
-            info "    Size: $(du -h "${asset%%#*}" | cut -f1)"
-        else
-            die "    File not found: ${asset%%#*}"
-        fi
-    done
     warn "Skipped tagging and release creation (--dry-run)."
     exit 0
 fi
