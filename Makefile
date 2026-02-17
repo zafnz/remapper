@@ -24,9 +24,12 @@ $(BUILD):
 $(BUILD)/rmp_shared.o: rmp_shared.c rmp_shared.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ rmp_shared.c
 
+INTERPOSE_SRC = interpose.c interpose_fs.c interpose_exec.c
+INTERPOSE_HDR = interpose.h rmp_shared.h
+
 # Build the dylib first (intermediate artifact, not installed separately)
-$(BUILD)/interpose.dylib: interpose.c $(BUILD)/rmp_shared.o rmp_shared.h | $(BUILD)
-	$(CC) $(CFLAGS) -dynamiclib -o $@ interpose.c $(BUILD)/rmp_shared.o
+$(BUILD)/interpose.dylib: $(INTERPOSE_SRC) $(INTERPOSE_HDR) $(BUILD)/rmp_shared.o | $(BUILD)
+	$(CC) $(CFLAGS) -dynamiclib -o $@ $(INTERPOSE_SRC) $(BUILD)/rmp_shared.o
 
 # Embed interpose.dylib into the remapper binary as a Mach-O section.
 # At runtime, remapper reads this section with getsectiondata() and writes
