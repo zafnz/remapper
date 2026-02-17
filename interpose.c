@@ -79,20 +79,17 @@ static void remapper_init(void) {
                 g_patterns[g_num_patterns].parent_len = plen;
                 strcpy(g_patterns[g_num_patterns].glob, last_slash + 1);
 
-                if (g_debug)
-                    fprintf(g_debug_fp, "[remapper] pattern[%d]: parent='%s' glob='%s'\n",
-                            g_num_patterns,
-                            g_patterns[g_num_patterns].parent,
-                            g_patterns[g_num_patterns].glob);
+                RMP_DEBUG("pattern[%d]: parent='%s' glob='%s'",
+                          g_num_patterns,
+                          g_patterns[g_num_patterns].parent,
+                          g_patterns[g_num_patterns].glob);
                 g_num_patterns++;
             }
         }
         tok = strtok_r(NULL, ":", &saveptr);
     }
 
-    if (g_debug)
-        fprintf(g_debug_fp, "[remapper] target='%s'  %d pattern(s) loaded\n",
-                g_target, g_num_patterns);
+    RMP_DEBUG("target='%s'  %d pattern(s) loaded", g_target, g_num_patterns);
 }
 
 /*** Path rewriting *******************************/
@@ -121,10 +118,7 @@ int try_rewrite(const char *path, char *out, size_t outsize) {
         if (fnmatch(g_patterns[i].glob, component, 0) == 0) {
             int n = snprintf(out, outsize, "%s%s", g_target, rest);
             if (n < 0 || (size_t)n >= outsize) continue;
-            if (g_debug) {
-                fprintf(g_debug_fp, "[remapper] rewrite: '%s' → '%s'\n", path, out);
-                fflush(g_debug_fp);
-            }
+            RMP_DEBUG("rewrite: '%s' → '%s'", path, out);
             return 1;
         }
     }

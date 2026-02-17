@@ -82,4 +82,13 @@ int try_rewrite(const char *path, char *out, size_t outsize);
                            try_rewrite((path), varname##_buf, sizeof(varname##_buf))) \
                           ? varname##_buf : (path)
 
+/*** Debug logging ********************************/
+
+#define RMP_DEBUG(fmt, ...) do { \
+    if (g_debug) { \
+        fprintf(g_debug_fp, "[remapper] " fmt "\n", ##__VA_ARGS__); \
+        fflush(g_debug_fp); \
+    } \
+} while (0)
+
 #endif /* INTERPOSE_H */

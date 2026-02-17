@@ -105,10 +105,7 @@ static const char *resolve_spawn_path(const char *path) {
     // Check on-disk cache
     if (rmp_cache_valid(cached, sb.st_mtime, sb.st_size)) {
         mcache_store(path, sb.st_mtime, sb.st_size, 1);
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] cache hit: %s\n", cached);
-            fflush(g_debug_fp);
-        }
+        RMP_DEBUG("cache hit: %s", cached);
         result = strdup(cached);
         goto done;
     }
@@ -118,18 +115,12 @@ static const char *resolve_spawn_path(const char *path) {
     mcache_store(path, sb.st_mtime, sb.st_size, hardened);
 
     if (!hardened) {
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] not hardened: %s\n", path);
-            fflush(g_debug_fp);
-        }
+        RMP_DEBUG("not hardened: %s", path);
         goto done;
     }
 
     // Hardened — create cached copy
-    if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] hardened, creating cache: %s\n", path);
-        fflush(g_debug_fp);
-    }
+    RMP_DEBUG("hardened, creating cache: %s", path);
 
     if (rmp_cache_create(&g_ctx, path, cached, sb.st_mtime, sb.st_size) == 0)
         result = strdup(cached);
@@ -166,7 +157,7 @@ static const char *resolve_sip_shebang(const char *path, char **shebang_arg) {
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        if (g_debug) { fprintf(g_debug_fp, "[remapper] shebang: open failed for %s\n", path); fflush(g_debug_fp); }
+        RMP_DEBUG("shebang: open failed for %s", path);
         goto done;
     }
 
@@ -198,20 +189,13 @@ static const char *resolve_sip_shebang(const char *path, char **shebang_arg) {
         interp_path[sizeof(interp_path) - 1] = '\0';
     }
 
-    if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] shebang check: interp='%s' sip=%d\n",
-                interp_path, is_sip_path(interp_path));
-        fflush(g_debug_fp);
-    }
+    RMP_DEBUG("shebang check: interp='%s' sip=%d", interp_path, is_sip_path(interp_path));
 
     // Check if interpreter needs re-signing (SIP-protected or hardened)
     if (!is_sip_path(interp_path)) {
         ensure_ctx();
         int h = rmp_is_hardened(&g_ctx, interp_path);
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] shebang interp hardened=%d\n", h);
-            fflush(g_debug_fp);
-        }
+        RMP_DEBUG("shebang interp hardened=%d", h);
         if (!h) {
             free(*shebang_arg);
             *shebang_arg = NULL;
@@ -241,10 +225,7 @@ static const char *resolve_sip_shebang(const char *path, char **shebang_arg) {
         }
     }
 
-    if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] shebang resign: %s → %s\n", interp_path, cached);
-        fflush(g_debug_fp);
-    }
+    RMP_DEBUG("shebang resign: %s → %s", interp_path, cached);
 
     result = strdup(cached);
 
@@ -279,11 +260,10 @@ static int my_posix_spawn(pid_t *pid, const char *path,
                           char *const argv[], char *const envp[]) {
     const char *actual = resolve_spawn_path(path);
     if (actual != path) {
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] posix_spawn: %s → %s (hardened)\n", path, actual);
-            fflush(g_debug_fp);
-        }
-        return posix_spawn(pid, actual, fa, sa, argv, envp);
+        RMP_DEBUG("posix_spawn: %s → %s (hardened)", path, actual);
+        int ret = posix_spawn(pid, actual, fa, sa, argv, envp);
+        free((void *)actual);
+        return ret;
     }
     // Check for shebang needing re-signing (SIP or hardened interpreter)
     char *shebang_arg = NULL;
@@ -291,16 +271,13 @@ static int my_posix_spawn(pid_t *pid, const char *path,
     if (cached_interp) {
         char *new_argv[256];
         sip_build_argv(new_argv, 256, cached_interp, shebang_arg, path, argv);
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] posix_spawn shebang: %s → %s\n", path, cached_interp);
-            fflush(g_debug_fp);
-        }
-        return posix_spawn(pid, cached_interp, fa, sa, new_argv, envp);
+        RMP_DEBUG("posix_spawn shebang: %s → %s", path, cached_interp);
+        int ret = posix_spawn(pid, cached_interp, fa, sa, new_argv, envp);
+        free((void *)cached_interp);
+        free(shebang_arg);
+        return ret;
     }
-    if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] posix_spawn: %s\n", path);
-        fflush(g_debug_fp);
-    }
+    RMP_DEBUG("posix_spawn: %s", path);
     return posix_spawn(pid, path, fa, sa, argv, envp);
 }
 DYLD_INTERPOSE(my_posix_spawn, posix_spawn)
@@ -313,11 +290,10 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
     if (resolve_in_path(file, resolved_path, sizeof(resolved_path))) {
         const char *actual = resolve_spawn_path(resolved_path);
         if (actual != resolved_path) {
-            if (g_debug) {
-                fprintf(g_debug_fp, "[remapper] posix_spawnp: %s → %s (hardened)\n", file, actual);
-                fflush(g_debug_fp);
-            }
-            return posix_spawn(pid, actual, fa, sa, argv, envp);
+            RMP_DEBUG("posix_spawnp: %s → %s (hardened)", file, actual);
+            int ret = posix_spawn(pid, actual, fa, sa, argv, envp);
+            free((void *)actual);
+            return ret;
         }
         // Check for SIP-protected shebang
         char *shebang_arg = NULL;
@@ -325,19 +301,15 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
         if (cached_interp) {
             char *new_argv[256];
             sip_build_argv(new_argv, 256, cached_interp, shebang_arg, resolved_path, argv);
-            if (g_debug) {
-                fprintf(g_debug_fp, "[remapper] posix_spawnp shebang: %s → %s\n", file, cached_interp);
-                fflush(g_debug_fp);
-            }
-            return posix_spawn(pid, cached_interp, fa, sa, new_argv, envp);
+            RMP_DEBUG("posix_spawnp shebang: %s → %s", file, cached_interp);
+            int ret = posix_spawn(pid, cached_interp, fa, sa, new_argv, envp);
+            free((void *)cached_interp);
+            free(shebang_arg);
+            return ret;
         }
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] posix_spawnp: %s (resolved: %s)\n", file, resolved_path);
-            fflush(g_debug_fp);
-        }
-    } else if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] posix_spawnp: %s (unresolved)\n", file);
-        fflush(g_debug_fp);
+        RMP_DEBUG("posix_spawnp: %s (resolved: %s)", file, resolved_path);
+    } else {
+        RMP_DEBUG("posix_spawnp: %s (unresolved)", file);
     }
     return posix_spawnp(pid, file, fa, sa, argv, envp);
 }
@@ -346,10 +318,7 @@ DYLD_INTERPOSE(my_posix_spawnp, posix_spawnp)
 static int my_execve(const char *path, char *const argv[], char *const envp[]) {
     const char *actual = resolve_spawn_path(path);
     if (actual != path) {
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] execve: %s → %s (hardened)\n", path, actual);
-            fflush(g_debug_fp);
-        }
+        RMP_DEBUG("execve: %s → %s (hardened)", path, actual);
         return execve(actual, argv, envp);
     }
     // Check for SIP-protected shebang
@@ -358,16 +327,10 @@ static int my_execve(const char *path, char *const argv[], char *const envp[]) {
     if (cached_interp) {
         char *new_argv[256];
         sip_build_argv(new_argv, 256, cached_interp, shebang_arg, path, argv);
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] execve shebang: %s → %s\n", path, cached_interp);
-            fflush(g_debug_fp);
-        }
+        RMP_DEBUG("execve shebang: %s → %s", path, cached_interp);
         return execve(cached_interp, new_argv, envp);
     }
-    if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] execve: %s\n", path);
-        fflush(g_debug_fp);
-    }
+    RMP_DEBUG("execve: %s", path);
     return execve(path, argv, envp);
 }
 DYLD_INTERPOSE(my_execve, execve)
@@ -375,10 +338,7 @@ DYLD_INTERPOSE(my_execve, execve)
 static int my_execv(const char *path, char *const argv[]) {
     const char *actual = resolve_spawn_path(path);
     if (actual != path) {
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] execv: %s → %s (hardened)\n", path, actual);
-            fflush(g_debug_fp);
-        }
+        RMP_DEBUG("execv: %s → %s (hardened)", path, actual);
         return execv(actual, argv);
     }
     // Check for SIP-protected shebang
@@ -387,16 +347,10 @@ static int my_execv(const char *path, char *const argv[]) {
     if (cached_interp) {
         char *new_argv[256];
         sip_build_argv(new_argv, 256, cached_interp, shebang_arg, path, argv);
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] execv shebang: %s → %s\n", path, cached_interp);
-            fflush(g_debug_fp);
-        }
+        RMP_DEBUG("execv shebang: %s → %s", path, cached_interp);
         return execv(cached_interp, new_argv);
     }
-    if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] execv: %s\n", path);
-        fflush(g_debug_fp);
-    }
+    RMP_DEBUG("execv: %s", path);
     return execv(path, argv);
 }
 DYLD_INTERPOSE(my_execv, execv)
@@ -406,10 +360,7 @@ static int my_execvp(const char *file, char *const argv[]) {
     if (resolve_in_path(file, resolved_path, sizeof(resolved_path))) {
         const char *actual = resolve_spawn_path(resolved_path);
         if (actual != resolved_path) {
-            if (g_debug) {
-                fprintf(g_debug_fp, "[remapper] execvp: %s → %s (hardened)\n", file, actual);
-                fflush(g_debug_fp);
-            }
+            RMP_DEBUG("execvp: %s → %s (hardened)", file, actual);
             return execv(actual, argv);
         }
         // Check for SIP-protected shebang
@@ -418,19 +369,12 @@ static int my_execvp(const char *file, char *const argv[]) {
         if (cached_interp) {
             char *new_argv[256];
             sip_build_argv(new_argv, 256, cached_interp, shebang_arg, resolved_path, argv);
-            if (g_debug) {
-                fprintf(g_debug_fp, "[remapper] execvp shebang: %s → %s\n", file, cached_interp);
-                fflush(g_debug_fp);
-            }
+            RMP_DEBUG("execvp shebang: %s → %s", file, cached_interp);
             return execv(cached_interp, new_argv);
         }
-        if (g_debug) {
-            fprintf(g_debug_fp, "[remapper] execvp: %s (resolved: %s)\n", file, resolved_path);
-            fflush(g_debug_fp);
-        }
-    } else if (g_debug) {
-        fprintf(g_debug_fp, "[remapper] execvp: %s (unresolved)\n", file);
-        fflush(g_debug_fp);
+        RMP_DEBUG("execvp: %s (resolved: %s)", file, resolved_path);
+    } else {
+        RMP_DEBUG("execvp: %s (unresolved)", file);
     }
     return execvp(file, argv);
 }
