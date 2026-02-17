@@ -358,7 +358,7 @@ int main(int argc, char **argv) {
     // Initialize shared context (resolves codesign, creates dirs, writes entitlements)
     FILE *debug_fp = NULL;
     if (debug_log) {
-        debug_fp = fopen(debug_log, "w");
+        debug_fp = fopen(debug_log, "we");
         if (!debug_fp) debug_fp = stderr;
     }
     rmp_ctx_t ctx;

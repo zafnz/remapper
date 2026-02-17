@@ -40,7 +40,7 @@ static void remapper_init(void) {
     const char *debug_log = getenv("RMP_DEBUG_LOG");
     if (debug_log && debug_log[0]) {
         g_debug = 1;
-        g_debug_fp = fopen(debug_log, "a");
+        g_debug_fp = fopen(debug_log, "ae");
         if (!g_debug_fp) g_debug_fp = stderr;
     }
 
