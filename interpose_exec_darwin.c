@@ -1,5 +1,5 @@
 /*
- * interpose_exec.c - Exec/spawn interpose functions with hardened binary re-signing
+ * interpose_exec_darwin.c - Exec/spawn interpose functions with hardened binary re-signing
  * Copyright (c) 2026 Nick Clifford <nick@nickclifford.com>
  *
  * This program is free software: you can redistribute it and/or modify

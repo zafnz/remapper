@@ -16,17 +16,42 @@
 #include <spawn.h>
 #include "interpose.h"
 
+/*** Real function pointers (resolved at load time) ***/
+
+static int (*real_posix_spawn)(pid_t *, const char *,
+                               const posix_spawn_file_actions_t *,
+                               const posix_spawnattr_t *,
+                               char *const[], char *const[]);
+static int (*real_posix_spawnp)(pid_t *, const char *,
+                                const posix_spawn_file_actions_t *,
+                                const posix_spawnattr_t *,
+                                char *const[], char *const[]);
+static int (*real_execve)(const char *, char *const[], char *const[]);
+static int (*real_execv)(const char *, char *const[]);
+static int (*real_execvp)(const char *, char *const[]);
+
+#define RESOLVE(name) real_##name = dlsym(RTLD_NEXT, #name)
+
+// Honestly just to get rid of the intellisense warnings about constructor 
+// not taking arguments in Darwin. 
+#ifdef __linux__ 
+__attribute__((constructor(201)))
+static void resolve_exec_symbols(void) {
+    RESOLVE(posix_spawn);
+    RESOLVE(posix_spawnp);
+    RESOLVE(execve);
+    RESOLVE(execv);
+    RESOLVE(execvp);
+}
+#endif 
+#undef RESOLVE
+
 /*** posix_spawn / posix_spawnp *******************/
 
 int posix_spawn(pid_t *pid, const char *path,
                 const posix_spawn_file_actions_t *fa,
                 const posix_spawnattr_t *sa,
                 char *const argv[], char *const envp[]) {
-    static int (*real_posix_spawn)(pid_t *, const char *,
-                                   const posix_spawn_file_actions_t *,
-                                   const posix_spawnattr_t *,
-                                   char *const[], char *const[]) = NULL;
-    if (!real_posix_spawn) real_posix_spawn = dlsym(RTLD_NEXT, "posix_spawn");
     RMP_DEBUG("posix_spawn: %s", path);
     return real_posix_spawn(pid, path, fa, sa, argv, envp);
 }
@@ -35,11 +60,6 @@ int posix_spawnp(pid_t *pid, const char *file,
                  const posix_spawn_file_actions_t *fa,
                  const posix_spawnattr_t *sa,
                  char *const argv[], char *const envp[]) {
-    static int (*real_posix_spawnp)(pid_t *, const char *,
-                                    const posix_spawn_file_actions_t *,
-                                    const posix_spawnattr_t *,
-                                    char *const[], char *const[]) = NULL;
-    if (!real_posix_spawnp) real_posix_spawnp = dlsym(RTLD_NEXT, "posix_spawnp");
     RMP_DEBUG("posix_spawnp: %s", file);
     return real_posix_spawnp(pid, file, fa, sa, argv, envp);
 }
@@ -47,22 +67,16 @@ int posix_spawnp(pid_t *pid, const char *file,
 /*** execve / execv / execvp **********************/
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
-    static int (*real_execve)(const char *, char *const[], char *const[]) = NULL;
-    if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
     RMP_DEBUG("execve: %s", path);
     return real_execve(path, argv, envp);
 }
 
 int execv(const char *path, char *const argv[]) {
-    static int (*real_execv)(const char *, char *const[]) = NULL;
-    if (!real_execv) real_execv = dlsym(RTLD_NEXT, "execv");
     RMP_DEBUG("execv: %s", path);
     return real_execv(path, argv);
 }
 
 int execvp(const char *file, char *const argv[]) {
-    static int (*real_execvp)(const char *, char *const[]) = NULL;
-    if (!real_execvp) real_execvp = dlsym(RTLD_NEXT, "execvp");
     RMP_DEBUG("execvp: %s", file);
     return real_execvp(file, argv);
 }

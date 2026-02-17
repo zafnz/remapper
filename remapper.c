@@ -245,19 +245,22 @@ static void usage(const char *prog) {
     exit(1);
 }
 
-/*** Main **************************************/
+/*** Argument parsing ***************************/
 
-int main(int argc, char **argv) {
-    // Parse optional flags
+// Parse CLI arguments.  Sets *target (malloc'd, absolute path),
+// *mappings (malloc'd, colon-separated), and *debug_log.
+// Returns the argv index where the command starts (cmd_start).
+static int parse_args(int argc, char **argv,
+                      char **target, char **mappings, const char **debug_log) {
     int arg_idx = 1;
-    const char *debug_log = getenv("RMP_DEBUG_LOG");
+    *debug_log = getenv("RMP_DEBUG_LOG");
 
     while (arg_idx < argc && argv[arg_idx][0] == '-' && strcmp(argv[arg_idx], "--") != 0) {
         if (strncmp(argv[arg_idx], "--debug-log=", 12) == 0) {
-            debug_log = argv[arg_idx] + 12;
+            *debug_log = argv[arg_idx] + 12;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--debug-log") == 0 && arg_idx + 1 < argc) {
-            debug_log = argv[arg_idx + 1];
+            *debug_log = argv[arg_idx + 1];
             arg_idx += 2;
         } else {
             fprintf(stderr, "Unknown option: %s\n\n", argv[arg_idx]);
@@ -269,29 +272,24 @@ int main(int argc, char **argv) {
     if (argc - arg_idx < 3) usage(argv[0]);
 
     // argv[arg_idx] = target directory
-    char *target = make_absolute(argv[arg_idx]);
-
-    // Create target directory if it doesn't exist
-    rmp_mkdirs(target, 0755);
+    *target = make_absolute(argv[arg_idx]);
+    rmp_mkdirs(*target, 0755);
 
     // Find '--' separator
     int sep_idx = -1;
     for (int i = arg_idx + 1; i < argc; i++) {
-        if (strcmp(argv[i], "--") == 0) {
-            sep_idx = i;
-            break;
-        }
+        if (strcmp(argv[i], "--") == 0) { sep_idx = i; break; }
     }
 
     int map_start = arg_idx + 1;
     int map_end, cmd_start;
 
     if (sep_idx >= 0) {
-        map_end   = sep_idx;          // mappings: argv[map_start .. sep_idx-1]
-        cmd_start = sep_idx + 1;      // command:  argv[sep_idx+1 ..]
+        map_end   = sep_idx;
+        cmd_start = sep_idx + 1;
     } else {
-        map_end   = arg_idx + 2;      // single mapping: argv[arg_idx+1]
-        cmd_start = arg_idx + 2;      // command: argv[arg_idx+2 ..]
+        map_end   = arg_idx + 2;
+        cmd_start = arg_idx + 2;
     }
 
     if (cmd_start >= argc) {
@@ -303,36 +301,102 @@ int main(int argc, char **argv) {
         usage(argv[0]);
     }
 
-    // Build colon-separated mappings string for the interpose library
-    char mappings_buf[65536];
+    // Build colon-separated mappings string
+    char buf[65536];
     size_t mlen = 0;
 
     for (int i = map_start; i < map_end; i++) {
-        char *pat = strdup(argv[i]);
-        if (!pat) { perror("strdup"); exit(1); }
-
-        char *abs = make_absolute(pat);
-        free(pat);
+        char *abs = make_absolute(argv[i]);
 
         if (mlen > 0) {
-            if (mlen + 1 >= sizeof(mappings_buf)) {
+            if (mlen + 1 >= sizeof(buf)) {
                 fprintf(stderr, "Error: mappings too long\n");
                 exit(1);
             }
-            mappings_buf[mlen++] = ':';
+            buf[mlen++] = ':';
         }
 
         size_t alen = strlen(abs);
-        if (mlen + alen >= sizeof(mappings_buf)) {
+        if (mlen + alen >= sizeof(buf)) {
             fprintf(stderr, "Error: mappings too long\n");
             exit(1);
         }
-        memcpy(mappings_buf + mlen, abs, alen);
+        memcpy(buf + mlen, abs, alen);
         mlen += alen;
         free(abs);
     }
-    mappings_buf[mlen] = '\0';
+    buf[mlen] = '\0';
 
+    *mappings = strdup(buf);
+    if (!*mappings) { perror("strdup"); exit(1); }
+
+    return cmd_start;
+}
+
+#ifdef __APPLE__
+void darwin_debug_info(rmp_ctx_t *ctx, FILE *debug_fp,  char *lib_path,  char *cmd_to_run) {
+    // Check dylib arch
+    if (debug_fp) {
+        char *file_argv[] = {"file", lib_path, NULL};
+        rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file_argv);
+        if (proc.fp) {
+            char line[1024];
+            if (fgets(line, sizeof(line), proc.fp))
+                fprintf(debug_fp, "[remapper] dylib:    %s", line);
+            rmp_pipe_close(&proc);
+        }
+    }
+
+    // Resolve the target binary and check its arch/signing
+    char resolved_cmd[PATH_MAX] = "";
+    {
+        char *which_argv[] = {"which", cmd_to_run, NULL};
+        rmp_pipe_t proc = rmp_pipe_open("/usr/bin/which", which_argv);
+        if (proc.fp) {
+            if (fgets(resolved_cmd, sizeof(resolved_cmd), proc.fp))
+                resolved_cmd[strcspn(resolved_cmd, "\n")] = '\0';
+            rmp_pipe_close(&proc);
+        }
+    }
+    if (debug_fp && resolved_cmd[0]) {
+        char *file2_argv[] = {"file", resolved_cmd, NULL};
+        rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file2_argv);
+        if (proc.fp) {
+            char line[1024];
+            if (fgets(line, sizeof(line), proc.fp))
+                fprintf(debug_fp, "[remapper] binary:   %s", line);
+            rmp_pipe_close(&proc);
+        }
+
+        char *cs_argv[] = {"codesign", "-dvvv", resolved_cmd, NULL};
+        rmp_pipe_t proc2 = rmp_pipe_open(ctx->codesign_path, cs_argv);
+        if (proc2.fp) {
+            char line[1024];
+            int found_any = 0;
+            while (fgets(line, sizeof(line), proc2.fp)) {
+                if (strstr(line, "runtime") || strstr(line, "Signature")) {
+                    fprintf(debug_fp, "[remapper] codesign: %s", line);
+                    found_any = 1;
+                }
+            }
+            if (!found_any)
+                fprintf(debug_fp, "[remapper] codesign: not signed\n");
+            rmp_pipe_close(&proc2);
+        }
+    }
+}
+#endif /* __APPLE__ */
+
+/*** Main **************************************/
+
+int main(int argc, char **argv) {
+    char *target;
+    char *mappings;
+    const char *debug_log;
+    char *cmd_to_run;
+
+    int cmd_start = parse_args(argc, argv, &target, &mappings, &debug_log);
+    cmd_to_run = argv[cmd_start];
     /*** Resolve config/cache directories **********/
 
     char home_pwbuf[1024];
@@ -406,7 +470,7 @@ int main(int argc, char **argv) {
 #endif
 
     // Determine the output path: $RMP_CONFIG/<LIB_NAME>
-    char lib_path[PATH_MAX];
+    char lib_path[PATH_MAX + 32];
     snprintf(lib_path, sizeof(lib_path), "%s/" LIB_NAME, config_dir);
 
     // Check if the on-disk copy is already up to date.
@@ -427,7 +491,7 @@ int main(int argc, char **argv) {
     if (need_extract) {
         rmp_mkdirs(config_dir, 0755);
 
-        char lib_tmp[PATH_MAX];
+        char lib_tmp[PATH_MAX + 64];
         snprintf(lib_tmp, sizeof(lib_tmp), "%s.tmp.%d", lib_path, getpid());
 
         int dfd = open(lib_tmp, O_CREAT | O_WRONLY | O_TRUNC, 0755);
@@ -482,7 +546,7 @@ int main(int argc, char **argv) {
     /*** Set environment variables *****************/
 
     setenv("RMP_TARGET", target, 1);
-    setenv("RMP_MAPPINGS", mappings_buf, 1);
+    setenv("RMP_MAPPINGS", mappings, 1);
 
 #ifdef __APPLE__
     setenv("DYLD_INSERT_LIBRARIES", lib_path, 1);
@@ -509,7 +573,7 @@ int main(int argc, char **argv) {
 
     if (debug_fp) {
         fprintf(debug_fp, "[remapper] target:   %s\n", target);
-        fprintf(debug_fp, "[remapper] mappings: %s\n", mappings_buf);
+        fprintf(debug_fp, "[remapper] mappings: %s\n", mappings);
         fprintf(debug_fp, "[remapper] config:   %s\n", config_dir);
 #ifdef __APPLE__
         fprintf(debug_fp, "[remapper] cache:    %s\n", cache_dir);
@@ -522,57 +586,10 @@ int main(int argc, char **argv) {
         for (int i = cmd_start; i < argc; i++)
             fprintf(debug_fp, " %s", argv[i]);
         fprintf(debug_fp, "\n");
-
+    
 #ifdef __APPLE__
-        // Check dylib arch
-        {
-            char *file_argv[] = {"file", lib_path, NULL};
-            rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file_argv);
-            if (proc.fp) {
-                char line[1024];
-                if (fgets(line, sizeof(line), proc.fp))
-                    fprintf(debug_fp, "[remapper] dylib:    %s", line);
-                rmp_pipe_close(&proc);
-            }
-        }
+        darwin_debug_info(&ctx, debug_fp, lib_path, cmd_to_run);
 
-        // Resolve the target binary and check its arch/signing
-        char resolved_cmd[PATH_MAX] = "";
-        {
-            char *which_argv[] = {"which", argv[cmd_start], NULL};
-            rmp_pipe_t proc = rmp_pipe_open("/usr/bin/which", which_argv);
-            if (proc.fp) {
-                if (fgets(resolved_cmd, sizeof(resolved_cmd), proc.fp))
-                    resolved_cmd[strcspn(resolved_cmd, "\n")] = '\0';
-                rmp_pipe_close(&proc);
-            }
-        }
-        if (resolved_cmd[0]) {
-            char *file2_argv[] = {"file", resolved_cmd, NULL};
-            rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file2_argv);
-            if (proc.fp) {
-                char line[1024];
-                if (fgets(line, sizeof(line), proc.fp))
-                    fprintf(debug_fp, "[remapper] binary:   %s", line);
-                rmp_pipe_close(&proc);
-            }
-
-            char *cs_argv[] = {"codesign", "-dvvv", resolved_cmd, NULL};
-            rmp_pipe_t proc2 = rmp_pipe_open(ctx.codesign_path, cs_argv);
-            if (proc2.fp) {
-                char line[1024];
-                int found_any = 0;
-                while (fgets(line, sizeof(line), proc2.fp)) {
-                    if (strstr(line, "runtime") || strstr(line, "Signature")) {
-                        fprintf(debug_fp, "[remapper] codesign: %s", line);
-                        found_any = 1;
-                    }
-                }
-                if (!found_any)
-                    fprintf(debug_fp, "[remapper] codesign: not signed\n");
-                rmp_pipe_close(&proc2);
-            }
-        }
 #endif /* __APPLE__ */
 
         fflush(debug_fp);
@@ -589,13 +606,13 @@ int main(int argc, char **argv) {
 
     // Resolve the command to a full (absolute) path
     char cmd_resolved[PATH_MAX] = "";
-    if (strchr(argv[cmd_start], '/')) {
+    if (strchr(cmd_to_run, '/')) {
         // Contains '/' — absolute or relative path; resolve to absolute
-        if (!realpath(argv[cmd_start], cmd_resolved))
+        if (!realpath(cmd_to_run, cmd_resolved))
             cmd_resolved[0] = '\0';
     } else {
         // Bare filename — search PATH
-        resolve_in_path(argv[cmd_start], cmd_resolved, sizeof(cmd_resolved));
+        resolve_in_path(cmd_to_run, cmd_resolved, sizeof(cmd_resolved));
     }
 
     // Check if it's a script with a shebang
@@ -731,6 +748,5 @@ int main(int argc, char **argv) {
         perror(argv[cmd_start]);
     }
 
-    free(target);
     return 127;
 }

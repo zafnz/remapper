@@ -27,7 +27,7 @@ ifeq ($(UNAME_S),Darwin)
 
 all: $(BUILD)/interpose.dylib $(BUILD)/remapper
 
-INTERPOSE_SRC = interpose.c interpose_fs.c interpose_exec.c
+INTERPOSE_SRC = interpose.c interpose_fs_darwin.c interpose_exec_darwin.c
 
 $(BUILD)/interpose.dylib: $(INTERPOSE_SRC) $(INTERPOSE_HDR) $(BUILD)/rmp_shared.o | $(BUILD)
 	$(CC) $(CFLAGS) -dynamiclib -o $@ $(INTERPOSE_SRC) $(BUILD)/rmp_shared.o
@@ -37,8 +37,8 @@ $(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose.dylib $(S
 		-Wl,-sectcreate,__DATA,__interpose_lib,$(BUILD)/interpose.dylib
 
 test: all
-	$(MAKE) -C test BUILD=$(CURDIR)/$(BUILD)
-	./test/test.sh
+	$(MAKE) -C test -f Makefile.darwin BUILD=$(CURDIR)/$(BUILD)
+	./test/test_darwin.sh
 
 else ifeq ($(UNAME_S),Linux)
 

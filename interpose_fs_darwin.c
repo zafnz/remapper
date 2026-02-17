@@ -1,5 +1,5 @@
 /*
- * interpose_fs.c - Filesystem interpose functions (open, stat, mkdir, etc.)
+ * interpose_fs_darwin.c - Filesystem interpose functions (open, stat, mkdir, etc.)
  * Copyright (c) 2026 Nick Clifford <nick@nickclifford.com>
  *
  * This program is free software: you can redistribute it and/or modify
