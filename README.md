@@ -141,8 +141,8 @@ make test
 
 ## Requirements
 
-- macOS (uses `DYLD_INSERT_LIBRARIES` and Mach-O codesigning)
-- Xcode command line tools (for `codesign` and `gcc`)
+- macOS (uses `DYLD_INSERT_LIBRARIES` and Mach-O codesigning; `codesign` ships with macOS)
+- Xcode command line tools (for building from source -- provides `gcc`/`clang`)
 
 ## License
 

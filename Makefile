@@ -46,7 +46,10 @@ $(BUILD)/hardened_spawner: spawn_hardened.c | $(BUILD)
 test: all $(BUILD)/test_interpose $(BUILD)/verify_test_interpose $(BUILD)/hardened_test $(BUILD)/spawn_hardened $(BUILD)/hardened_interp $(BUILD)/hardened_spawner
 	./test.sh
 
+deploy:
+	./deploy.sh
+
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all clean test
+.PHONY: all clean test deploy
