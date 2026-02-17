@@ -162,4 +162,8 @@ make test
 
 ## License
 
-See [LICENSE](LICENSE) if present, or contact the author.
+This program is copyright 2026, Nick Clifford <nick@nickclifford.com>.
+
+It is distributed under the GNU General Public License v3.0
+
+See [LICENSE](LICENSE) 

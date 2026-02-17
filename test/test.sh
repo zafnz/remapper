@@ -1,7 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-BUILD="build"
+# Resolve paths relative to the project root (one level up from this script)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD="$PROJECT_ROOT/build"
 PASS=0
 FAIL=0
 CLEANUP_DIRS=()

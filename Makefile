@@ -1,3 +1,16 @@
+# Makefile for building remapper
+# Copyright (c) 2026 Nick Clifford <nick@nickclifford.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O2
 BUILD   = build
@@ -7,6 +20,7 @@ all: $(BUILD)/interpose.dylib $(BUILD)/remapper
 $(BUILD):
 	mkdir -p $(BUILD)
 
+# Shared code between the CLI and the interposer
 $(BUILD)/rmp_shared.o: rmp_shared.c rmp_shared.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ rmp_shared.c
 
@@ -22,29 +36,9 @@ $(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose.dylib rmp
 	$(CC) $(CFLAGS) -o $@ remapper.c $(BUILD)/rmp_shared.o \
 		-Wl,-sectcreate,__DATA,__interpose_lib,$(BUILD)/interpose.dylib
 
-$(BUILD)/test_interpose: test_interpose.c | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $<
-
-$(BUILD)/verify_test_interpose: verify_test_interpose.c | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $<
-
-$(BUILD)/hardened_test: hardened_test.c | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $<
-	codesign --force -s - --options runtime $@
-
-$(BUILD)/spawn_hardened: spawn_hardened.c | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $<
-
-$(BUILD)/hardened_interp: hardened_interp.c | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $<
-	codesign --force -s - --options runtime $@
-
-$(BUILD)/hardened_spawner: spawn_hardened.c | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $<
-	codesign --force -s - --options runtime $@
-
-test: all $(BUILD)/test_interpose $(BUILD)/verify_test_interpose $(BUILD)/hardened_test $(BUILD)/spawn_hardened $(BUILD)/hardened_interp $(BUILD)/hardened_spawner
-	./test.sh
+test: all
+	$(MAKE) -C test BUILD=$(CURDIR)/$(BUILD)
+	./test/test.sh
 
 deploy:
 	./deploy.sh $(VERSION)

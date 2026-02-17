@@ -1,5 +1,11 @@
 /*
  * interpose.c - DYLD_INSERT_LIBRARIES interposer for path redirection on macOS
+ * Copyright (c) 2026 Nick Clifford <nick@nickclifford.com>
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
  * Reads configuration from environment variables:
  *   RMP_TARGET    - target directory (e.g., /tmp/myapp-v1)
