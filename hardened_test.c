@@ -15,7 +15,10 @@
 
 int main(void) {
     const char *home = getenv("HOME");
-    if (!home || !*home) home = "/Users/zaf";
+    if (!home || !*home) {
+        fprintf(stderr, "HOME not set\n");
+        return 1;
+    }
 
     char dir[1024], file[1024];
     snprintf(dir, sizeof(dir), "%s/.dummy-hardened", home);

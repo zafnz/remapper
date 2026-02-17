@@ -2,7 +2,7 @@
  * verify_test_interpose.c - verify results WITHOUT the interposer
  *
  * Run AFTER test_interpose, WITHOUT DYLD_INSERT_LIBRARIES:
- *   ./verify_test_interpose /tmp/alt-test /Users/zaf
+ *   ./verify_test_interpose /tmp/alt-test "$HOME"
  *
  * Checks:
  *   1. Expected files exist in <target> with correct content/perms

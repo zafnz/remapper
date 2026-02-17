@@ -353,27 +353,15 @@ int main(int argc, char **argv) {
     // strip DYLD_INSERT_LIBRARIES when /usr/bin/env runs.  Detect this
     // and exec the interpreter directly instead.
 
-    // Resolve the command to a full path
+    // Resolve the command to a full (absolute) path
     char cmd_resolved[PATH_MAX] = "";
-    if (argv[cmd_start][0] == '/') {
-        strncpy(cmd_resolved, argv[cmd_start], sizeof(cmd_resolved) - 1);
+    if (strchr(argv[cmd_start], '/')) {
+        // Contains '/' — absolute or relative path; resolve to absolute
+        if (!realpath(argv[cmd_start], cmd_resolved))
+            cmd_resolved[0] = '\0';
     } else {
-        char *path_env = getenv("PATH");
-        if (path_env) {
-            char *path_copy = strdup(path_env);
-            char *saveptr = NULL;
-            char *dir = strtok_r(path_copy, ":", &saveptr);
-            while (dir) {
-                char try[PATH_MAX];
-                snprintf(try, sizeof(try), "%s/%s", dir, argv[cmd_start]);
-                if (access(try, X_OK) == 0) {
-                    strncpy(cmd_resolved, try, sizeof(cmd_resolved) - 1);
-                    break;
-                }
-                dir = strtok_r(NULL, ":", &saveptr);
-            }
-            free(path_copy);
-        }
+        // Bare filename — search PATH
+        resolve_in_path(argv[cmd_start], cmd_resolved, sizeof(cmd_resolved));
     }
 
     // Check if it's a script with a shebang
@@ -459,70 +447,77 @@ int main(int argc, char **argv) {
                         }
                     }
                 }
-                // #!/path/to/interpreter — if SIP-protected, copy+re-sign
-                else if (strncmp(interp, "/usr/", 5) == 0 ||
-                         strncmp(interp, "/bin/", 5) == 0 ||
-                         strncmp(interp, "/sbin/", 6) == 0) {
+                // #!/path/to/interpreter — if SIP-protected or hardened, copy+re-sign
+                else {
                     // Parse interpreter path and optional arg
-                    static char sip_interp[PATH_MAX];
-                    static char sip_arg_buf[256];
-                    char *sip_arg = NULL;
+                    static char shebang_interp[PATH_MAX];
+                    static char shebang_arg_buf[256];
+                    char *shebang_arg = NULL;
                     char *sp = strchr(interp, ' ');
                     if (sp) {
                         size_t ilen = (size_t)(sp - interp);
-                        if (ilen >= sizeof(sip_interp)) ilen = sizeof(sip_interp) - 1;
-                        memcpy(sip_interp, interp, ilen);
-                        sip_interp[ilen] = '\0';
+                        if (ilen >= sizeof(shebang_interp)) ilen = sizeof(shebang_interp) - 1;
+                        memcpy(shebang_interp, interp, ilen);
+                        shebang_interp[ilen] = '\0';
                         char *a = sp + 1;
                         while (*a == ' ') a++;
                         if (*a) {
-                            strncpy(sip_arg_buf, a, sizeof(sip_arg_buf) - 1);
-                            sip_arg_buf[sizeof(sip_arg_buf) - 1] = '\0';
-                            sip_arg = sip_arg_buf;
+                            strncpy(shebang_arg_buf, a, sizeof(shebang_arg_buf) - 1);
+                            shebang_arg_buf[sizeof(shebang_arg_buf) - 1] = '\0';
+                            shebang_arg = shebang_arg_buf;
                         }
                     } else {
-                        strncpy(sip_interp, interp, sizeof(sip_interp) - 1);
-                        sip_interp[sizeof(sip_interp) - 1] = '\0';
+                        strncpy(shebang_interp, interp, sizeof(shebang_interp) - 1);
+                        shebang_interp[sizeof(shebang_interp) - 1] = '\0';
                     }
 
-                    struct stat sip_sb;
-                    static char cached_interp[PATH_MAX];
-                    int sip_ok = 0;
+                    // Check if interpreter needs re-signing
+                    int need_resign = (strncmp(shebang_interp, "/usr/", 5) == 0 ||
+                                       strncmp(shebang_interp, "/bin/", 5) == 0 ||
+                                       strncmp(shebang_interp, "/sbin/", 6) == 0);
+                    if (!need_resign)
+                        need_resign = rmp_is_hardened(&ctx, shebang_interp);
 
-                    if (stat(sip_interp, &sip_sb) == 0) {
-                        rmp_cache_path(ctx.cache_dir, sip_interp,
-                                       cached_interp, sizeof(cached_interp));
-                        if (rmp_cache_valid(cached_interp, sip_sb.st_mtime, sip_sb.st_size) ||
-                            rmp_cache_create(&ctx, sip_interp, cached_interp,
-                                             sip_sb.st_mtime, sip_sb.st_size) == 0) {
-                            sip_ok = 1;
+                    if (need_resign) {
+                        struct stat interp_sb;
+                        static char cached_interp[PATH_MAX];
+                        int resign_ok = 0;
+
+                        if (stat(shebang_interp, &interp_sb) == 0) {
+                            rmp_cache_path(ctx.cache_dir, shebang_interp,
+                                           cached_interp, sizeof(cached_interp));
+                            if (rmp_cache_valid(cached_interp, interp_sb.st_mtime, interp_sb.st_size) ||
+                                rmp_cache_create(&ctx, shebang_interp, cached_interp,
+                                                 interp_sb.st_mtime, interp_sb.st_size) == 0) {
+                                resign_ok = 1;
+                            }
                         }
-                    }
 
-                    if (sip_ok) {
-                        int ai = 0;
-                        exec_argv[ai++] = cached_interp;
-                        if (sip_arg) exec_argv[ai++] = sip_arg;
-                        exec_argv[ai++] = cmd_resolved;
-                        for (int i = cmd_start + 1; i < argc && ai < 255; i++)
-                            exec_argv[ai++] = argv[i];
-                        exec_argv[ai] = NULL;
-                        use_rewritten = 1;
+                        if (resign_ok) {
+                            int ai = 0;
+                            exec_argv[ai++] = cached_interp;
+                            if (shebang_arg) exec_argv[ai++] = shebang_arg;
+                            exec_argv[ai++] = cmd_resolved;
+                            for (int i = cmd_start + 1; i < argc && ai < 255; i++)
+                                exec_argv[ai++] = argv[i];
+                            exec_argv[ai] = NULL;
+                            use_rewritten = 1;
 
-                        if (debug_fp) {
-                            fprintf(debug_fp, "[remapper] SIP shebang: %s → %s\n",
-                                    sip_interp, cached_interp);
-                            fprintf(debug_fp, "[remapper] rewritten:");
-                            for (int i = 0; exec_argv[i]; i++)
-                                fprintf(debug_fp, " %s", exec_argv[i]);
-                            fprintf(debug_fp, "\n");
-                            fflush(debug_fp);
+                            if (debug_fp) {
+                                fprintf(debug_fp, "[remapper] shebang resign: %s → %s\n",
+                                        shebang_interp, cached_interp);
+                                fprintf(debug_fp, "[remapper] rewritten:");
+                                for (int i = 0; exec_argv[i]; i++)
+                                    fprintf(debug_fp, " %s", exec_argv[i]);
+                                fprintf(debug_fp, "\n");
+                                fflush(debug_fp);
+                            }
+                        } else {
+                            fprintf(stderr,
+                                "[remapper] WARNING: %s has shebang '%s' that needs re-signing\n"
+                                "  Failed to create cached copy. Interposition may NOT work.\n",
+                                cmd_resolved, interp);
                         }
-                    } else {
-                        fprintf(stderr,
-                            "[remapper] WARNING: %s uses SIP-protected shebang '%s'\n"
-                            "  Failed to create cached copy. Interposition may NOT work.\n",
-                            cmd_resolved, interp);
                     }
                 }
             }

@@ -6,7 +6,12 @@ PASS=0
 FAIL=0
 CLEANUP_DIRS=()
 
-# Use a temp directory for remapper config/cache so nothing touches $HOME
+# Use a fake HOME so nothing touches the real home directory
+TESTHOME=$(mktemp -d)
+CLEANUP_DIRS+=("$TESTHOME")
+export HOME="$TESTHOME"
+
+# Use a temp directory for remapper config/cache
 RMP_TMPDIR=$(mktemp -d)
 CLEANUP_DIRS+=("$RMP_TMPDIR")
 export RMP_CONFIG="$RMP_TMPDIR/config"
@@ -138,6 +143,67 @@ if [ ! -f "$HOME/.dummy-hardened/proof.txt" ]; then
 else
     fail "execvp PATH lookup: proof.txt found in home (should have been redirected)"
     rm -rf "$HOME/.dummy-hardened"
+fi
+
+###############################################################################
+# Group 6: Hardened shebang interpreter
+#   Script whose #! interpreter is a hardened binary (not SIP, just hardened).
+#   Tests that both remapper.c and the interposer detect and re-sign it.
+###############################################################################
+echo "=== Group 6: Hardened shebang interpreter ==="
+TMPDIR6=$(mktemp -d)
+CLEANUP_DIRS+=("$TMPDIR6")
+
+INTERP_ABS="$(cd "$(dirname "$BUILD/hardened_interp")" && pwd)/$(basename "$BUILD/hardened_interp")"
+
+# Create a script with a hardened-binary shebang
+SCRIPT6="$TMPDIR6/test_script"
+cat > "$SCRIPT6" <<ENDOFSCRIPT
+#!${INTERP_ABS}
+# test script with hardened interpreter
+ENDOFSCRIPT
+chmod +x "$SCRIPT6"
+
+# 6a: remapper directly runs the script
+echo "--- 6a: remapper → script with hardened shebang ---"
+TARGET6a="$TMPDIR6/target-a"
+mkdir -p "$TARGET6a"
+DEBUGLOG6a="$TMPDIR6/debug-a.log"
+
+"$BUILD/remapper" --debug-log "$DEBUGLOG6a" "$TARGET6a" "$HOME/.dummy*" -- "$SCRIPT6"
+
+if [ -f "$TARGET6a/.dummy-hardened-interp/proof.txt" ]; then
+    pass "hardened shebang (direct): proof.txt in target dir"
+else
+    fail "hardened shebang (direct): proof.txt NOT in target dir"
+fi
+if [ ! -f "$HOME/.dummy-hardened-interp/proof.txt" ]; then
+    pass "hardened shebang (direct): proof.txt NOT in home"
+else
+    fail "hardened shebang (direct): proof.txt found in home"
+    rm -rf "$HOME/.dummy-hardened-interp"
+fi
+
+# 6b: hardened spawner (itself hardened) spawns the script — full chain
+#   remapper re-signs hardened_spawner → interposer detects hardened shebang → re-signs interpreter
+echo "--- 6b: hardened spawner → script with hardened shebang ---"
+TARGET6b="$TMPDIR6/target-b"
+mkdir -p "$TARGET6b"
+DEBUGLOG6b="$TMPDIR6/debug-b.log"
+
+"$BUILD/remapper" --debug-log "$DEBUGLOG6b" "$TARGET6b" "$HOME/.dummy*" -- \
+    "$BUILD/hardened_spawner" "$SCRIPT6"
+
+if [ -f "$TARGET6b/.dummy-hardened-interp/proof.txt" ]; then
+    pass "hardened shebang (hardened spawner): proof.txt in target dir"
+else
+    fail "hardened shebang (hardened spawner): proof.txt NOT in target dir"
+fi
+if [ ! -f "$HOME/.dummy-hardened-interp/proof.txt" ]; then
+    pass "hardened shebang (hardened spawner): proof.txt NOT in home"
+else
+    fail "hardened shebang (hardened spawner): proof.txt found in home"
+    rm -rf "$HOME/.dummy-hardened-interp"
 fi
 
 ###############################################################################

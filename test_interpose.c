@@ -2,7 +2,7 @@
  * test_interpose.c - exercise all interposed filesystem functions
  *
  * Run via remapper:
- *   RMP_DEBUG_LOG=/tmp/rmp.log ./remapper /tmp/alt-test '/Users/zaf/.dummy*' -- ./test_interpose
+ *   RMP_DEBUG_LOG=/tmp/rmp.log ./remapper /tmp/alt-test "$HOME/.dummy*" -- ./test_interpose
  *
  * Leaves artifacts in the target dir for verify_test_interpose to check.
  *
@@ -59,7 +59,10 @@ static void write_to_fd(int fd, const char *s) {
 
 int main(void) {
     const char *home = getenv("HOME");
-    if (!home || !*home) home = "/Users/zaf";
+    if (!home || !*home) {
+        fprintf(stderr, "HOME not set\n");
+        return 1;
+    }
 
     const char *target = getenv("RMP_TARGET");
     if (!target) {

@@ -29,7 +29,15 @@ $(BUILD)/hardened_test: hardened_test.c | $(BUILD)
 $(BUILD)/spawn_hardened: spawn_hardened.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $<
 
-test: all $(BUILD)/test_interpose $(BUILD)/verify_test_interpose $(BUILD)/hardened_test $(BUILD)/spawn_hardened
+$(BUILD)/hardened_interp: hardened_interp.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $<
+	codesign --force -s - --options runtime $@
+
+$(BUILD)/hardened_spawner: spawn_hardened.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $<
+	codesign --force -s - --options runtime $@
+
+test: all $(BUILD)/test_interpose $(BUILD)/verify_test_interpose $(BUILD)/hardened_test $(BUILD)/spawn_hardened $(BUILD)/hardened_interp $(BUILD)/hardened_spawner
 	./test.sh
 
 clean:
