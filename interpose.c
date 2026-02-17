@@ -1,5 +1,5 @@
 /*
- * interpose.c - DYLD_INSERT_LIBRARIES interposer for path redirection on macOS
+ * interpose.c - Shared library interposer for path redirection
  * Copyright (c) 2026 Nick Clifford <nick@nickclifford.com>
  *
  * This program is free software: you can redistribute it and/or modify

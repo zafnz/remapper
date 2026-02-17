@@ -14,34 +14,69 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O2
 BUILD   = build
+UNAME_S := $(shell uname -s)
+
+SHARED_HDR     = rmp_shared.h
+INTERPOSE_HDR  = interpose.h $(SHARED_HDR)
+
+##############################################################################
+# Platform-specific targets
+##############################################################################
+
+ifeq ($(UNAME_S),Darwin)
 
 all: $(BUILD)/interpose.dylib $(BUILD)/remapper
 
-$(BUILD):
-	mkdir -p $(BUILD)
+INTERPOSE_SRC = interpose.c interpose_fs_darwin.c interpose_exec_darwin.c
 
-# Shared code between the CLI and the interposer
-$(BUILD)/rmp_shared.o: rmp_shared.c rmp_shared.h | $(BUILD)
-	$(CC) $(CFLAGS) -c -o $@ rmp_shared.c
-
-INTERPOSE_SRC = interpose.c interpose_fs.c interpose_exec.c
-INTERPOSE_HDR = interpose.h rmp_shared.h
-
-# Build the dylib first (intermediate artifact, not installed separately)
 $(BUILD)/interpose.dylib: $(INTERPOSE_SRC) $(INTERPOSE_HDR) $(BUILD)/rmp_shared.o | $(BUILD)
 	$(CC) $(CFLAGS) -dynamiclib -o $@ $(INTERPOSE_SRC) $(BUILD)/rmp_shared.o
 
-# Embed interpose.dylib into the remapper binary as a Mach-O section.
-# At runtime, remapper reads this section with getsectiondata() and writes
-# the dylib out to $RMP_CONFIG/interpose.dylib on first run (or when stale).
-# This means the user only needs to distribute/install a single file.
-$(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose.dylib rmp_shared.h | $(BUILD)
+$(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose.dylib $(SHARED_HDR) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ remapper.c $(BUILD)/rmp_shared.o \
 		-Wl,-sectcreate,__DATA,__interpose_lib,$(BUILD)/interpose.dylib
 
 test: all
-	$(MAKE) -C test BUILD=$(CURDIR)/$(BUILD)
-	./test/test.sh
+	$(MAKE) -C test -f Makefile.darwin BUILD=$(CURDIR)/$(BUILD)
+	./test/test_darwin.sh
+
+else ifeq ($(UNAME_S),Linux)
+
+all: $(BUILD)/remapper
+
+INTERPOSE_SRC_LINUX = interpose.c interpose_fs_linux.c interpose_exec_linux.c
+
+# Build the shared library (intermediate artifact — will be embedded)
+$(BUILD)/interpose.so: $(INTERPOSE_SRC_LINUX) $(INTERPOSE_HDR) $(BUILD)/rmp_shared.o | $(BUILD)
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $(INTERPOSE_SRC_LINUX) $(BUILD)/rmp_shared.o -ldl
+
+# Wrap interpose.so into a relocatable object so it can be linked into remapper.
+# This creates symbols: _binary_interpose_so_start, _binary_interpose_so_end
+$(BUILD)/interpose_so.o: $(BUILD)/interpose.so | $(BUILD)
+	cd $(BUILD) && ld -r -b binary -o interpose_so.o interpose.so
+
+# Embed interpose.so into the remapper binary.
+# At runtime, remapper reads _binary_interpose_so_start/end and writes
+# the .so out to $RMP_CONFIG/interpose.so on first run (or when stale).
+# This means the user only needs to distribute/install a single file.
+$(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose_so.o $(SHARED_HDR) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose_so.o
+
+test: all
+	$(MAKE) -C test -f Makefile.linux BUILD=$(CURDIR)/$(BUILD)
+	./test/test_linux.sh
+
+endif
+
+##############################################################################
+# Shared rules
+##############################################################################
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+$(BUILD)/rmp_shared.o: rmp_shared.c $(SHARED_HDR) | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ rmp_shared.c
 
 deploy:
 	./deploy.sh $(VERSION)

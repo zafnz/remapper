@@ -1,7 +1,7 @@
-/* rmp_shared.c - shared cache and hardened-binary utilities for remapper
+/* rmp_shared.c - shared utilities for remapper
  *
  * Copyright (c) 2026 Nick Clifford <nick@nickclifford.com>
- * 
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
@@ -19,10 +19,13 @@
 #include <sys/wait.h>
 #include <pwd.h>
 #include <stdatomic.h>
+#ifdef __APPLE__
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
 #include <copyfile.h>
+#endif
 
+#ifdef __APPLE__
 // Thread-safe home directory lookup: try $HOME, fall back to getpwuid_r.
 static const char *get_home_dir(char *buf, size_t bufsize) {
     const char *home = getenv("HOME");
@@ -34,6 +37,7 @@ static const char *get_home_dir(char *buf, size_t bufsize) {
 
     return NULL;
 }
+#endif
 
 
 // Resolve a bare filename via $PATH. If `file` contains '/', copy it
@@ -97,12 +101,13 @@ rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]) {
         close(pipefd[1]);
         execv(path, argv);
         // exec failed — write error to stderr (which is the pipe)
+        // Assign to suppress GCC's warn_unused_result after fork
         int e = errno;
         const char *msg = "execv failed: ";
-        write(STDERR_FILENO, msg, strlen(msg));
+        __attribute__((unused)) ssize_t r1 = write(STDERR_FILENO, msg, strlen(msg));
         const char *err = strerror(e);
-        write(STDERR_FILENO, err, strlen(err));
-        write(STDERR_FILENO, "\n", 1);
+        __attribute__((unused)) ssize_t r2 = write(STDERR_FILENO, err, strlen(err));
+        __attribute__((unused)) ssize_t r3 = write(STDERR_FILENO, "\n", 1);
         _exit(127);
     }
 
@@ -134,24 +139,6 @@ int rmp_pipe_close(rmp_pipe_t *proc) {
     return -1;
 }
 
-/*** Entitlements plist **************************/
-
-static const char *ENTITLEMENTS_PLIST =
-    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-    "<plist version=\"1.0\">\n"
-    "<dict>\n"
-    "\t<key>com.apple.security.cs.allow-dyld-environment-variables</key>\n"
-    "\t<true/>\n"
-    "\t<key>com.apple.security.cs.disable-library-validation</key>\n"
-    "\t<true/>\n"
-    "</dict>\n"
-    "</plist>\n";
-
-// Atomic counter for unique temp file names (thread-safe)
-static _Atomic int g_tmp_seq = 0;
-
 /*** rmp_mkdirs **********************************/
 
 void rmp_mkdirs(const char *path, mode_t mode) {
@@ -167,6 +154,12 @@ void rmp_mkdirs(const char *path, mode_t mode) {
     }
     mkdir(tmp, mode);
 }
+
+/*** macOS-only: hardened binary cache ************/
+#ifdef __APPLE__
+
+// Atomic counter for unique temp file names (thread-safe)
+static _Atomic int g_tmp_seq = 0;
 
 // Write data to a temp file and atomically rename into place.
 // Avoids partial reads if two processes race.
@@ -191,6 +184,21 @@ static int atomic_write_file(const char *path, const char *data, size_t len, mod
     }
     return 0;
 }
+
+/*** Entitlements plist **************************/
+
+static const char *ENTITLEMENTS_PLIST =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "\t<key>com.apple.security.cs.allow-dyld-environment-variables</key>\n"
+    "\t<true/>\n"
+    "\t<key>com.apple.security.cs.disable-library-validation</key>\n"
+    "\t<true/>\n"
+    "</dict>\n"
+    "</plist>\n";
 
 /*** rmp_ctx_init ********************************/
 
@@ -261,7 +269,7 @@ int rmp_is_hardened(const rmp_ctx_t *ctx, const char *path) {
     }
 
     if (codesign == NULL || codesign[0] == '\0') {
-        // If we don't have codesign then we can't resign the binary, so 
+        // If we don't have codesign then we can't resign the binary, so
         // fallback to treating it as hardened to avoid silently failing to insert the dylib.
         return 1;
     }
@@ -451,3 +459,5 @@ const char *rmp_resolve_hardened(rmp_ctx_t *ctx, const char *path, int *was_cach
 
     return path;
 }
+
+#endif /* __APPLE__ */

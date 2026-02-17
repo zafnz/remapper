@@ -54,7 +54,7 @@ static int passes   = 0;
 } while(0)
 
 static void write_to_fd(int fd, const char *s) {
-    write(fd, s, strlen(s));
+    __attribute__((unused)) ssize_t ignored = write(fd, s, strlen(s));
 }
 
 int main(void) {
@@ -77,7 +77,7 @@ int main(void) {
     char base[1024];
     snprintf(base, sizeof(base), "%s/.dummy-test", home);
 
-    char path[1024];  /* scratch buffer for building paths */
+    char path[1088];  /* scratch buffer for building paths (base + suffix) */
 
     printf("=== Exercising all interposed functions ===\n");
     printf("HOME:   %s\n", home);
@@ -191,7 +191,7 @@ int main(void) {
     /*  rename                                                          */
     /* ================================================================ */
     printf("\n[rename]\n");
-    char oldp[1024], newp[1024];
+    char oldp[1088], newp[1088];
     snprintf(oldp, sizeof(oldp), "%s/pre-rename.txt", base);
     snprintf(newp, sizeof(newp), "%s/renamed.txt", base);
     fd = open(oldp, O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -220,7 +220,7 @@ int main(void) {
     fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) { write_to_fd(fd, "link-target\n"); close(fd); }
 
-    char lnk[1024];
+    char lnk[1088];
     snprintf(lnk, sizeof(lnk), "%s/symlink.lnk", base);
     CHECK("symlink", symlink("link-target.txt", lnk) == 0);
 
@@ -327,13 +327,13 @@ int main(void) {
     /* ================================================================ */
     printf("\n[chdir]\n");
     char orig_cwd[PATH_MAX];
-    getcwd(orig_cwd, sizeof(orig_cwd));
+    if (!getcwd(orig_cwd, sizeof(orig_cwd))) orig_cwd[0] = '\0';
     CHECK("chdir into .dummy-test", chdir(base) == 0);
     /* Create a file via relative path to prove we're in the right dir */
     fd = open("chdir-proof.txt", O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) { write_to_fd(fd, "chdir-ok\n"); close(fd); }
     CHECK("chdir-proof.txt created", access("chdir-proof.txt", F_OK) == 0);
-    chdir(orig_cwd);  /* restore */
+    __attribute__((unused)) int ignored = chdir(orig_cwd);  /* restore */
 
     /* ================================================================ */
     /*  unlink                                                          */
