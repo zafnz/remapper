@@ -8,10 +8,24 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <pwd.h>
 #include <stdatomic.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
 #include <copyfile.h>
+
+// Thread-safe home directory lookup: try $HOME, fall back to getpwuid_r.
+static const char *get_home_dir(char *buf, size_t bufsize) {
+    const char *home = getenv("HOME");
+    if (home && home[0]) return home;
+
+    struct passwd pw, *result = NULL;
+    if (getpwuid_r(geteuid(), &pw, buf, bufsize, &result) == 0 && result)
+        return result->pw_dir;
+
+    return NULL;
+}
 
 /*** Entitlements plist **************************/
 
@@ -75,16 +89,18 @@ static int atomic_write_file(const char *path, const char *data, size_t len, mod
 
 void rmp_ctx_init(rmp_ctx_t *ctx, const char *config_dir,
                   const char *cache_dir, FILE *debug_fp) {
-    const char *home = getenv("HOME");
-    if (!home) home = "/tmp";
+    char pwbuf[1024];
+    const char *home = get_home_dir(pwbuf, sizeof(pwbuf));
 
     ctx->debug_fp = debug_fp;
 
     // Config dir
     if (config_dir && config_dir[0]) {
         strncpy(ctx->config_dir, config_dir, sizeof(ctx->config_dir) - 1);
-    } else {
+    } else if (home) {
         snprintf(ctx->config_dir, sizeof(ctx->config_dir), "%s/.remapper", home);
+    } else {
+        snprintf(ctx->config_dir, sizeof(ctx->config_dir), "/tmp/.remapper");
     }
     ctx->config_dir[sizeof(ctx->config_dir) - 1] = '\0';
 

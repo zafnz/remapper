@@ -30,10 +30,24 @@
 #include <libgen.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <pwd.h>
 #include <mach-o/dyld.h>
 #include "rmp_shared.h"
 
 /*** Helpers ***********************************/
+
+// Thread-safe home directory lookup: try $HOME, fall back to getpwuid_r.
+static const char *get_home_dir(char *buf, size_t bufsize) {
+    const char *home = getenv("HOME");
+    if (home && home[0]) return home;
+
+    struct passwd pw, *result = NULL;
+    if (getpwuid_r(geteuid(), &pw, buf, bufsize, &result) == 0 && result)
+        return result->pw_dir;
+
+    return NULL;
+}
 
 // Expand leading ~ or ~/ to $HOME.  Caller must free() the result.
 static char *expand_tilde(const char *path) {
@@ -42,7 +56,8 @@ static char *expand_tilde(const char *path) {
     if (path[1] != '/' && path[1] != '\0')
         return strdup(path);   // ~user form not supported
 
-    const char *home = getenv("HOME");
+    char pwbuf[1024];
+    const char *home = get_home_dir(pwbuf, sizeof(pwbuf));
     if (!home) return strdup(path);
 
     size_t hlen = strlen(home);
@@ -194,8 +209,8 @@ int main(int argc, char **argv) {
 
     /*** Resolve config/cache directories **********/
 
-    const char *home_dir = getenv("HOME");
-    if (!home_dir) home_dir = "/tmp";
+    char home_pwbuf[1024];
+    const char *home_dir = get_home_dir(home_pwbuf, sizeof(home_pwbuf));
 
     // RMP_CONFIG defaults to ~/.remapper/
     char config_dir[PATH_MAX];
@@ -205,8 +220,10 @@ int main(int argc, char **argv) {
         strncpy(config_dir, abs_cfg, sizeof(config_dir) - 1);
         config_dir[sizeof(config_dir) - 1] = '\0';
         free(abs_cfg);
-    } else {
+    } else if (home_dir) {
         snprintf(config_dir, sizeof(config_dir), "%s/.remapper", home_dir);
+    } else {
+        snprintf(config_dir, sizeof(config_dir), "/tmp/.remapper");
     }
 
     // RMP_CACHE defaults to $RMP_CONFIG/cache/
