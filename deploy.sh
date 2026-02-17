@@ -7,6 +7,7 @@
 #   ./deploy.sh v1.2.3             # use an explicit version
 #   ./deploy.sh --docker-linux     # also build and include Linux binary via Docker
 #   ./deploy.sh --docker-linux v1.2.3
+#   ./deploy.sh --dry-run          # build everything but skip tagging and release creation
 #
 # Prerequisites:
 #   - Clean working tree (everything committed and pushed)
@@ -27,6 +28,7 @@ warn() { echo -e "${YELLOW}$1${NC}"; }
 BUILD="build"
 BINARY="$BUILD/remapper"
 DOCKER_LINUX=0
+DRY_RUN=0
 
 ########################################
 # 0. Parse flags
@@ -35,6 +37,7 @@ POSITIONAL=()
 for arg in "$@"; do
     case "$arg" in
         --docker-linux) DOCKER_LINUX=1 ;;
+        --dry-run) DRY_RUN=1 ;;
         *) POSITIONAL+=("$arg") ;;
     esac
 done
@@ -150,6 +153,20 @@ if [ "$DOCKER_LINUX" -eq 1 ]; then
     make clean
     make
     cp "$BINARY" "$MACOS_ASSET"
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    info "Dry run complete. Built assets:"
+    for asset in "${ASSETS[@]}"; do
+        info "  ${asset%%#*}"
+        if [ -f "${asset%%#*}" ]; then
+            info "    Size: $(du -h "${asset%%#*}" | cut -f1)"
+        else
+            die "    File not found: ${asset%%#*}"
+        fi
+    done
+    warn "Skipped tagging and release creation (--dry-run)."
+    exit 0
 fi
 
 ########################################
