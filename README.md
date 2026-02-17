@@ -9,6 +9,29 @@ alias claude-work='remapper ~/claude-work "~/.claude*" claude'
 
 Now `claude-personal` and `claude-work` each get their own separate `~/.claude/` directory, completely independent of each other and the default.
 
+## Install
+
+Download the latest binary and put it in your PATH:
+
+```bash
+mkdir -p ~/.local/bin
+curl -L -o ~/.local/bin/remapper \
+    https://github.com/zafnz/remapper/releases/latest/download/remapper-macos-arm64
+chmod +x ~/.local/bin/remapper
+```
+
+Make sure `~/.local/bin` is in your PATH (add to `~/.zshrc` if needed):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+If macOS blocks the binary on first run, remove the quarantine attribute:
+
+```bash
+xattr -d com.apple.quarantine ~/.local/bin/remapper
+```
+
 ## Usage
 
 ```
