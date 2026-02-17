@@ -504,7 +504,9 @@ int main(int argc, char **argv) {
                     }
 
                     // Resolve prog_name via PATH
-                    char interp_resolved[PATH_MAX] = "";
+                    // Must be static: exec_argv holds a pointer to this buffer
+                    // and execv() runs after this block goes out of scope.
+                    static char interp_resolved[PATH_MAX] = "";
                     char *path_env2 = getenv("PATH");
                     if (path_env2) {
                         char *pc = strdup(path_env2);
@@ -526,10 +528,17 @@ int main(int argc, char **argv) {
                         int ai = 0;
                         exec_argv[ai++] = interp_resolved;
 
+                        // extra arg (e.g. #!/usr/bin/env -S node) — copy
+                        // to a static buffer since shebang[] is stack-local
+                        static char env_extra_buf[256];
                         if (space) {
                             char *extra = space + 1;
                             while (*extra == ' ') extra++;
-                            if (*extra) exec_argv[ai++] = extra;
+                            if (*extra) {
+                                strncpy(env_extra_buf, extra, sizeof(env_extra_buf) - 1);
+                                env_extra_buf[sizeof(env_extra_buf) - 1] = '\0';
+                                exec_argv[ai++] = env_extra_buf;
+                            }
                         }
 
                         exec_argv[ai++] = cmd_resolved;

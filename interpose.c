@@ -118,7 +118,6 @@ int try_rewrite(const char *path, char *out, size_t outsize) {
         if (fnmatch(g_patterns[i].glob, component, 0) == 0) {
             int n = snprintf(out, outsize, "%s%s", g_target, rest);
             if (n < 0 || (size_t)n >= outsize) continue;
-            RMP_DEBUG("rewrite: '%s' → '%s'", path, out);
             return 1;
         }
     }

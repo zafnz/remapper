@@ -71,16 +71,36 @@ int try_rewrite(const char *path, char *out, size_t outsize);
  * But avoids function call overhead and allows inlining into interposed functions.
  */
 #define REWRITE_1(varname, path) \
+    REWRITE_1_F(varname, path, NULL)
+
+#define REWRITE_1_F(varname, path, func) \
     char varname##_buf[PATH_MAX]; \
-    const char *varname = try_rewrite((path), varname##_buf, sizeof(varname##_buf)) \
-                          ? varname##_buf : (path)
+    const char *varname; \
+    if (try_rewrite((path), varname##_buf, sizeof(varname##_buf))) { \
+        if ((func) && g_debug) \
+            fprintf(g_debug_fp, "[remapper] %s('%s' => '%s')\n", \
+                    (const char *)(func), (path), varname##_buf); \
+        varname = varname##_buf; \
+    } else { \
+        varname = (path); \
+    }
 
 // Convenience: rewrite a path only if absolute (for *at() variants)
 #define REWRITE_ABS(varname, path) \
+    REWRITE_ABS_F(varname, path, NULL)
+
+#define REWRITE_ABS_F(varname, path, func) \
     char varname##_buf[PATH_MAX]; \
-    const char *varname = ((path) && (path)[0] == '/' && \
-                           try_rewrite((path), varname##_buf, sizeof(varname##_buf))) \
-                          ? varname##_buf : (path)
+    const char *varname; \
+    if ((path) && (path)[0] == '/' && \
+        try_rewrite((path), varname##_buf, sizeof(varname##_buf))) { \
+        if ((func) && g_debug) \
+            fprintf(g_debug_fp, "[remapper] %s('%s' => '%s')\n", \
+                    (const char *)(func), (path), varname##_buf); \
+        varname = varname##_buf; \
+    } else { \
+        varname = (path); \
+    }
 
 /*** Debug logging ********************************/
 

@@ -47,10 +47,10 @@ remapper <target-dir> <mapping> <program> [args...]
 
 ```bash
 # Single mapping (-- is optional)
-remapper ~/v1 '~/.claude*' claude
+remapper ~/claude-personal '~/.claude*' claude
 
 # Multiple mappings (-- required)
-remapper ~/isolated '~/.claude*' '~/.config*' -- claude
+remapper ~/isolated '~/.test*' '~/.config*' -- test
 
 # With debug logging
 remapper --debug-log /tmp/rmp.log ~/v1 '~/.claude*' claude
@@ -68,6 +68,14 @@ Use `--` to separate mappings from the command when specifying more than one:
 ```bash
 remapper ~/myenv '~/.config/app*' '~/.local/share/app*' -- myapp --flag
 ```
+
+## Specific Applications
+
+**Codex GUI:**
+```bash
+remapper ~/.codex-alt '~/.codex*' -- /Applications/Codex.app/Contents/MacOS/Codex
+```
+(Note: Launching from `codex app` doesn't seem to work)
 
 ## Environment variables
 
