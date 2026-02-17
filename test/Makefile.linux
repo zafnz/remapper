@@ -1,0 +1,12 @@
+CC      = gcc
+CFLAGS  = -Wall -Wextra -O2
+BUILD   = ../build
+
+PLAIN = test_interpose verify_test_interpose
+
+all: $(PLAIN:%=$(BUILD)/%)
+
+$(PLAIN:%=$(BUILD)/%): $(BUILD)/%: %.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+.PHONY: all

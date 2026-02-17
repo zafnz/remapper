@@ -1,4 +1,4 @@
-// rmp_shared.h - shared cache and hardened-binary utilities for remapper
+// rmp_shared.h - shared utilities for remapper
 
 #ifndef RMP_SHARED_H
 #define RMP_SHARED_H
@@ -7,7 +7,32 @@
 #include <limits.h>
 #include <sys/types.h>
 
-// Context for cache operations
+/*** Portable utilities ***************************/
+
+// Create directory path recursively
+void rmp_mkdirs(const char *path, mode_t mode);
+
+// Resolve a bare filename via $PATH.
+// Returns 1 on success (result in `out`), 0 on failure.
+int resolve_in_path(const char *file, char *out, size_t outsize);
+
+// Safe popen replacement: fork+execv with stdout+stderr piped back.
+// No shell involved — immune to injection via filenames.
+typedef struct {
+    FILE *fp;    // read end of pipe (caller reads from this)
+    pid_t pid;   // child pid
+} rmp_pipe_t;
+
+// Spawn a child process. Returns .fp=NULL on failure.
+rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]);
+
+// Close pipe and wait for child. Returns exit status, or -1 on error.
+int rmp_pipe_close(rmp_pipe_t *proc);
+
+/*** macOS-only: hardened binary cache ************/
+#ifdef __APPLE__
+
+// Context for cache operations (macOS only — codesign + entitlements)
 typedef struct {
     char cache_dir[PATH_MAX];
     char config_dir[PATH_MAX];
@@ -15,9 +40,6 @@ typedef struct {
     char codesign_path[PATH_MAX];  // resolved once at init
     FILE *debug_fp; // NULL = no debug logging
 } rmp_ctx_t;
-
-// Create directory path recursively
-void rmp_mkdirs(const char *path, mode_t mode);
 
 // Initialize context: populate paths, create dirs, write entitlements plist.
 // config_dir / cache_dir: if NULL, defaults to ~/.remapper / ~/.remapper/cache.
@@ -49,19 +71,6 @@ int rmp_cache_create(rmp_ctx_t *ctx, const char *original,
 // Sets *was_cached = 1 if the returned path is a cached copy.
 const char *rmp_resolve_hardened(rmp_ctx_t *ctx, const char *path, int *was_cached);
 
-// Safe popen replacement: fork+execv with stdout+stderr piped back.
-// No shell involved — immune to injection via filenames.
-typedef struct {
-    FILE *fp;    // read end of pipe (caller reads from this)
-    pid_t pid;   // child pid
-} rmp_pipe_t;
-
-// Spawn a child process. Returns .fp=NULL on failure.
-rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]);
-
-// Close pipe and wait for child. Returns exit status, or -1 on error.
-int rmp_pipe_close(rmp_pipe_t *proc);
-
-int resolve_in_path(const char *file, char *out, size_t outsize);
+#endif /* __APPLE__ */
 
 #endif // RMP_SHARED_H

@@ -1,5 +1,5 @@
 /*
- * interpose.h - Shared declarations for the DYLD interposer
+ * interpose.h - Shared declarations for the path interposer
  * Copyright (c) 2026 Nick Clifford <nick@nickclifford.com>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -26,8 +26,10 @@
 
 #include "rmp_shared.h"
 
-/*** DYLD interpose macro *************************/
+/*** Interpose mechanism **************************/
 
+#ifdef __APPLE__
+/* macOS: DYLD_INTERPOSE — place function pairs in __DATA,__interpose section */
 #define DYLD_INTERPOSE(_replacement, _replacee) \
     __attribute__((used)) static struct { \
         const void *replacement; \
@@ -36,6 +38,11 @@
         (const void *)(unsigned long)&_replacement, \
         (const void *)(unsigned long)&_replacee \
     };
+#else
+/* Linux: LD_PRELOAD — functions are exported directly with the libc name,
+ * so DYLD_INTERPOSE is not needed. Define as empty for the darwin sources. */
+#define DYLD_INTERPOSE(_replacement, _replacee)
+#endif
 
 /*** Pattern storage ******************************/
 

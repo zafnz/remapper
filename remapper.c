@@ -1,14 +1,14 @@
 /*
- * remapper - redirect filesystem paths for any program on macOS
+ * remapper - redirect filesystem paths for any program
  *
  * Copyright (c) 2026 Nick Clifford <nick@nickclifford.com>
- * 
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * 
+ *
  * Usage:
  *   remapper [--debug-log <file>] <target-dir> <mapping>... -- <program> [args...]
  *
@@ -24,10 +24,19 @@
  *
  * Environment variables:
  *   RMP_CONFIG     Base directory (default: ~/.remapper/)
- *   RMP_CACHE      Cache directory (default: $RMP_CONFIG/cache/)
+ *   RMP_CACHE      Cache directory (default: $RMP_CONFIG/cache/) [macOS only]
  *   RMP_DEBUG_LOG  Log file path (enables debug logging when set)
- *   RMP_TARGET     Set by CLI for the dylib
- *   RMP_MAPPINGS   Set by CLI for the dylib (colon-separated)
+ *   RMP_TARGET     Set by CLI for the interpose library
+ *   RMP_MAPPINGS   Set by CLI for the interpose library (colon-separated)
+ *
+ * The interpose library is embedded inside this binary at build time.
+ * On macOS: -sectcreate __DATA __interpose_lib <dylib>
+ * On Linux: ld -r -b binary -o interpose_so.o interpose.so
+ *
+ * This means `remapper` is a single self-contained binary -- no need to
+ * keep the interpose library alongside it.  On first run (or when the
+ * embedded version changes), we extract it to $RMP_CONFIG/ so that
+ * DYLD_INSERT_LIBRARIES / LD_PRELOAD can load it from disk.
  */
 
 #include <stdio.h>
@@ -40,30 +49,120 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <pwd.h>
-#include <mach-o/dyld.h>
-#include <mach-o/getsect.h>
 #include <errno.h>
+#include <stdint.h>
 #include "rmp_shared.h"
 
-/*
- * The interpose.dylib is embedded inside this binary at build time using
- * the linker flag: -sectcreate __DATA __interpose_lib <dylib-file>
- *
- * This means `remapper` is a single self-contained binary -- no need to
- * keep interpose.dylib alongside it.  On first run (or when the embedded
- * version changes), we extract the dylib to $RMP_CONFIG/interpose.dylib
- * so that DYLD_INSERT_LIBRARIES can load it from disk.
- *
- * Why not load it directly from memory?  DYLD_INSERT_LIBRARIES requires
- * a filesystem path -- the kernel needs to mmap the dylib from a real file.
- *
- * We use getsectiondata() to get a pointer to the embedded blob and its
- * size, then write it to disk only when the on-disk copy is missing or
- * has a different size (i.e., after rebuilding remapper with a new dylib).
- */
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
 
 /* Declared by the linker -- the Mach-O header of this executable */
 extern const struct mach_header_64 _mh_execute_header;
+
+#define LIB_NAME    "interpose.dylib"
+#define LIB_ENVVAR  "DYLD_INSERT_LIBRARIES"
+
+#else /* Linux */
+
+/*
+ * The interpose.so is embedded at build time via ld -r -b binary.
+ * The linker creates these symbols automatically from the filename.
+ */
+extern const uint8_t _binary_interpose_so_start[];
+extern const uint8_t _binary_interpose_so_end[];
+
+#define LIB_NAME    "interpose.so"
+#define LIB_ENVVAR  "LD_PRELOAD"
+
+#endif
+
+#ifdef __APPLE__
+/*
+ * resolve_sip_shebang - handle #!/path/to/interpreter shebangs on macOS
+ *
+ * If the interpreter is SIP-protected (/usr/, /bin/, /sbin/) or has
+ * hardened runtime, create a cached re-signed copy and rewrite exec_argv
+ * to use it.  Returns 1 if exec_argv was rewritten, 0 otherwise.
+ */
+static int resolve_sip_shebang(rmp_ctx_t *ctx, FILE *debug_fp,
+                                const char *interp, const char *cmd_resolved,
+                                char **exec_argv, int argc, char **argv,
+                                int cmd_start) {
+    // Parse interpreter path and optional arg
+    static char shebang_interp[PATH_MAX];
+    static char shebang_arg_buf[256];
+    char *shebang_arg = NULL;
+    char *sp = strchr(interp, ' ');
+    if (sp) {
+        size_t ilen = (size_t)(sp - interp);
+        if (ilen >= sizeof(shebang_interp)) ilen = sizeof(shebang_interp) - 1;
+        memcpy(shebang_interp, interp, ilen);
+        shebang_interp[ilen] = '\0';
+        char *a = sp + 1;
+        while (*a == ' ') a++;
+        if (*a) {
+            strncpy(shebang_arg_buf, a, sizeof(shebang_arg_buf) - 1);
+            shebang_arg_buf[sizeof(shebang_arg_buf) - 1] = '\0';
+            shebang_arg = shebang_arg_buf;
+        }
+    } else {
+        strncpy(shebang_interp, interp, sizeof(shebang_interp) - 1);
+        shebang_interp[sizeof(shebang_interp) - 1] = '\0';
+    }
+
+    // Check if interpreter needs re-signing
+    int need_resign = (strncmp(shebang_interp, "/usr/", 5) == 0 ||
+                       strncmp(shebang_interp, "/bin/", 5) == 0 ||
+                       strncmp(shebang_interp, "/sbin/", 6) == 0);
+    if (!need_resign)
+        need_resign = rmp_is_hardened(ctx, shebang_interp);
+
+    if (!need_resign)
+        return 0;
+
+    struct stat interp_sb;
+    static char cached_interp[PATH_MAX];
+    int resign_ok = 0;
+
+    if (stat(shebang_interp, &interp_sb) == 0) {
+        rmp_cache_path(ctx->cache_dir, shebang_interp,
+                       cached_interp, sizeof(cached_interp));
+        if (rmp_cache_valid(cached_interp, interp_sb.st_mtime, interp_sb.st_size) ||
+            rmp_cache_create(ctx, shebang_interp, cached_interp,
+                             interp_sb.st_mtime, interp_sb.st_size) == 0) {
+            resign_ok = 1;
+        }
+    }
+
+    if (resign_ok) {
+        int ai = 0;
+        exec_argv[ai++] = cached_interp;
+        if (shebang_arg) exec_argv[ai++] = shebang_arg;
+        exec_argv[ai++] = (char *)cmd_resolved;
+        for (int i = cmd_start + 1; i < argc && ai < 255; i++)
+            exec_argv[ai++] = argv[i];
+        exec_argv[ai] = NULL;
+
+        if (debug_fp) {
+            fprintf(debug_fp, "[remapper] shebang resign: %s → %s\n",
+                    shebang_interp, cached_interp);
+            fprintf(debug_fp, "[remapper] rewritten:");
+            for (int i = 0; exec_argv[i]; i++)
+                fprintf(debug_fp, " %s", exec_argv[i]);
+            fprintf(debug_fp, "\n");
+            fflush(debug_fp);
+        }
+        return 1;
+    }
+
+    fprintf(stderr,
+        "[remapper] WARNING: %s has shebang '%s' that needs re-signing\n"
+        "  Failed to create cached copy. Interposition may NOT work.\n",
+        cmd_resolved, interp);
+    return 0;
+}
+#endif /* __APPLE__ */
 
 /*** Helpers ***********************************/
 
@@ -138,7 +237,9 @@ static void usage(const char *prog) {
         "\n"
         "Environment variables:\n"
         "  RMP_CONFIG      Base directory (default: ~/.remapper/)\n"
+#ifdef __APPLE__
         "  RMP_CACHE       Cache directory (default: $RMP_CONFIG/cache/)\n"
+#endif
         "  RMP_DEBUG_LOG   Log file (enables debug when set)\n",
         prog, prog, prog, prog);
     exit(1);
@@ -202,7 +303,7 @@ int main(int argc, char **argv) {
         usage(argv[0]);
     }
 
-    // Build colon-separated mappings string for the dylib
+    // Build colon-separated mappings string for the interpose library
     char mappings_buf[65536];
     size_t mlen = 0;
 
@@ -251,6 +352,7 @@ int main(int argc, char **argv) {
         snprintf(config_dir, sizeof(config_dir), "/tmp/.remapper");
     }
 
+#ifdef __APPLE__
     // RMP_CACHE defaults to $RMP_CONFIG/cache/
     char cache_dir[PATH_MAX];
     const char *cache_env = getenv("RMP_CACHE");
@@ -262,82 +364,88 @@ int main(int argc, char **argv) {
     } else {
         snprintf(cache_dir, sizeof(cache_dir), "%s/cache", config_dir);
     }
+#endif
 
-    /*** Extract embedded interpose.dylib **********/
+    /*** Extract embedded interpose library ********/
     //
-    // The dylib is embedded in this binary's __DATA,__interpose_lib section
-    // (put there at build time by the linker's -sectcreate flag).
-    //
-    // We extract it to: $RMP_CONFIG/interpose.dylib
+    // We extract it to: $RMP_CONFIG/<LIB_NAME>
     //
     // We only rewrite the file when:
     //   - it doesn't exist on disk yet (first run), OR
     //   - its size differs from the embedded blob (remapper was rebuilt)
     //
     // This avoids unnecessary writes on every invocation while ensuring
-    // an updated remapper binary always deploys its matching dylib.
+    // an updated remapper binary always deploys its matching library.
 
-    // Step 1: Read the embedded dylib blob from our own Mach-O section.
-    //         getsectiondata() returns a pointer into our already-mapped
-    //         executable image -- no allocation or I/O needed.
+#ifdef __APPLE__
+    // Read the embedded dylib blob from our own Mach-O section.
+    // getsectiondata() returns a pointer into our already-mapped
+    // executable image -- no allocation or I/O needed.
     unsigned long embed_size = 0;
     const uint8_t *embed_data = getsectiondata(
         &_mh_execute_header, "__DATA", "__interpose_lib", &embed_size);
 
     if (!embed_data || embed_size == 0) {
         fprintf(stderr,
-            "Error: no embedded interpose.dylib found in this binary.\n"
+            "Error: no embedded " LIB_NAME " found in this binary.\n"
             "  The binary may have been built without -sectcreate.\n");
         exit(1);
     }
+#else
+    // Get the embedded blob pointer and size from linker symbols.
+    const uint8_t *embed_data = _binary_interpose_so_start;
+    unsigned long embed_size =
+        (unsigned long)(_binary_interpose_so_end - _binary_interpose_so_start);
 
-    // Step 2: Determine the output path: $RMP_CONFIG/interpose.dylib
-    char dylib_path[PATH_MAX];
-    snprintf(dylib_path, sizeof(dylib_path), "%s/interpose.dylib", config_dir);
+    if (embed_size == 0) {
+        fprintf(stderr,
+            "Error: no embedded " LIB_NAME " found in this binary.\n"
+            "  The binary may have been built without the embed step.\n");
+        exit(1);
+    }
+#endif
 
-    // Step 3: Check if the on-disk copy is already up to date.
-    //         Compare file size against the embedded blob size -- if they
-    //         match, the dylib hasn't changed and we skip the write.
+    // Determine the output path: $RMP_CONFIG/<LIB_NAME>
+    char lib_path[PATH_MAX];
+    snprintf(lib_path, sizeof(lib_path), "%s/" LIB_NAME, config_dir);
+
+    // Check if the on-disk copy is already up to date.
+    // Compare file size against the embedded blob size -- if they
+    // match, the library hasn't changed and we skip the write.
     int need_extract = 0;
-    struct stat dylib_sb;
-    if (stat(dylib_path, &dylib_sb) != 0) {
-        // File doesn't exist -- need to create it
+    struct stat lib_sb;
+    if (stat(lib_path, &lib_sb) != 0) {
         need_extract = 1;
-    } else if ((unsigned long)dylib_sb.st_size != embed_size) {
-        // File exists but size differs -- remapper was rebuilt with a
-        // new dylib, so overwrite the stale copy
+    } else if ((unsigned long)lib_sb.st_size != embed_size) {
         need_extract = 1;
     }
 
-    // Step 4: Write the embedded dylib to disk if needed.
-    //         We write to a temp file and rename() into place so that
-    //         a concurrent remapper invocation never sees a half-written
-    //         dylib (rename is atomic on the same filesystem).
+    // Write the embedded library to disk if needed.
+    // We write to a temp file and rename() into place so that
+    // a concurrent remapper invocation never sees a half-written
+    // library (rename is atomic on the same filesystem).
     if (need_extract) {
-        // Ensure the config directory exists
         rmp_mkdirs(config_dir, 0755);
 
-        // Write to a temp file first, then atomically rename into place
-        char dylib_tmp[PATH_MAX];
-        snprintf(dylib_tmp, sizeof(dylib_tmp), "%s.tmp.%d", dylib_path, getpid());
+        char lib_tmp[PATH_MAX];
+        snprintf(lib_tmp, sizeof(lib_tmp), "%s.tmp.%d", lib_path, getpid());
 
-        int dfd = open(dylib_tmp, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+        int dfd = open(lib_tmp, O_CREAT | O_WRONLY | O_TRUNC, 0755);
         if (dfd < 0) {
             fprintf(stderr, "Error: cannot write %s: %s\n",
-                    dylib_tmp, strerror(errno));
+                    lib_tmp, strerror(errno));
             exit(1);
         }
 
-        // Write the entire blob in a loop to handle partial writes
         const uint8_t *p = embed_data;
         unsigned long remaining = embed_size;
         while (remaining > 0) {
             ssize_t written = write(dfd, p, remaining);
             if (written <= 0) {
                 fprintf(stderr, "Error: write to %s failed: %s\n",
-                        dylib_tmp, strerror(errno));
+                        lib_tmp, strerror(errno));
                 close(dfd);
-                unlink(dylib_tmp);
+                unlink(lib_tmp);
                 exit(1);
             }
             p += written;
@@ -345,22 +453,23 @@ int main(int argc, char **argv) {
         }
         close(dfd);
 
-        // Atomic rename: if two remapper processes race, the last one
-        // wins (both have identical content, so this is harmless)
-        if (rename(dylib_tmp, dylib_path) != 0) {
+        if (rename(lib_tmp, lib_path) != 0) {
             fprintf(stderr, "Error: cannot install %s: %s\n",
-                    dylib_path, strerror(errno));
-            unlink(dylib_tmp);
+                    lib_path, strerror(errno));
+            unlink(lib_tmp);
             exit(1);
         }
     }
 
-    // Initialize shared context (resolves codesign, creates dirs, writes entitlements)
+    // Open debug log
     FILE *debug_fp = NULL;
     if (debug_log) {
         debug_fp = fopen(debug_log, "we");
         if (!debug_fp) debug_fp = stderr;
     }
+
+#ifdef __APPLE__
+    // Initialize shared context (resolves codesign, creates dirs, writes entitlements)
     rmp_ctx_t ctx;
     rmp_ctx_init(&ctx, config_dir, cache_dir, debug_fp);
 
@@ -368,18 +477,30 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error: cannot find 'codesign' in PATH\n");
         exit(1);
     }
+#endif
 
     /*** Set environment variables *****************/
 
     setenv("RMP_TARGET", target, 1);
     setenv("RMP_MAPPINGS", mappings_buf, 1);
-    setenv("DYLD_INSERT_LIBRARIES", dylib_path, 1);
 
-    // Propagate config/cache dirs so the dylib uses the same ones
-    setenv("RMP_CONFIG", config_dir, 1);
+#ifdef __APPLE__
+    setenv("DYLD_INSERT_LIBRARIES", lib_path, 1);
     setenv("RMP_CACHE", cache_dir, 1);
+#else
+    // LD_PRELOAD: prepend our .so to any existing value
+    const char *existing_preload = getenv("LD_PRELOAD");
+    if (existing_preload && existing_preload[0]) {
+        char preload_buf[PATH_MAX * 2];
+        snprintf(preload_buf, sizeof(preload_buf), "%s:%s", lib_path, existing_preload);
+        setenv("LD_PRELOAD", preload_buf, 1);
+    } else {
+        setenv("LD_PRELOAD", lib_path, 1);
+    }
+#endif
 
-    // Propagate debug log if set via CLI flag
+    setenv("RMP_CONFIG", config_dir, 1);
+
     if (debug_log) {
         setenv("RMP_DEBUG_LOG", debug_log, 1);
     }
@@ -390,17 +511,22 @@ int main(int argc, char **argv) {
         fprintf(debug_fp, "[remapper] target:   %s\n", target);
         fprintf(debug_fp, "[remapper] mappings: %s\n", mappings_buf);
         fprintf(debug_fp, "[remapper] config:   %s\n", config_dir);
+#ifdef __APPLE__
         fprintf(debug_fp, "[remapper] cache:    %s\n", cache_dir);
-        fprintf(debug_fp, "[remapper] dylib:    %s\n", dylib_path);
+        fprintf(debug_fp, "[remapper] dylib:    %s\n", lib_path);
         fprintf(debug_fp, "[remapper] codesign: %s\n", ctx.codesign_path);
+#else
+        fprintf(debug_fp, "[remapper] so:       %s\n", lib_path);
+#endif
         fprintf(debug_fp, "[remapper] command: ");
         for (int i = cmd_start; i < argc; i++)
             fprintf(debug_fp, " %s", argv[i]);
         fprintf(debug_fp, "\n");
 
+#ifdef __APPLE__
         // Check dylib arch
         {
-            char *file_argv[] = {"file", dylib_path, NULL};
+            char *file_argv[] = {"file", lib_path, NULL};
             rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file_argv);
             if (proc.fp) {
                 char line[1024];
@@ -447,15 +573,19 @@ int main(int argc, char **argv) {
                 rmp_pipe_close(&proc2);
             }
         }
+#endif /* __APPLE__ */
 
         fflush(debug_fp);
     }
 
     /*** Shebang resolution ************************/
     //
-    // If the command is a script with #!/usr/bin/env <prog>, SIP will
-    // strip DYLD_INSERT_LIBRARIES when /usr/bin/env runs.  Detect this
-    // and exec the interpreter directly instead.
+    // If the command is a script with #!/usr/bin/env <prog>, resolve it
+    // so we exec the interpreter directly.
+    //
+    // On macOS this is critical: SIP will strip DYLD_INSERT_LIBRARIES
+    // when /usr/bin/env runs.  On Linux it's useful for debug logging
+    // to show the real interpreter path.
 
     // Resolve the command to a full (absolute) path
     char cmd_resolved[PATH_MAX] = "";
@@ -507,22 +637,7 @@ int main(int argc, char **argv) {
                     // Must be static: exec_argv holds a pointer to this buffer
                     // and execv() runs after this block goes out of scope.
                     static char interp_resolved[PATH_MAX] = "";
-                    char *path_env2 = getenv("PATH");
-                    if (path_env2) {
-                        char *pc = strdup(path_env2);
-                        char *sp = NULL;
-                        char *d = strtok_r(pc, ":", &sp);
-                        while (d) {
-                            char try[PATH_MAX];
-                            snprintf(try, sizeof(try), "%s/%s", d, prog_name);
-                            if (access(try, X_OK) == 0) {
-                                strncpy(interp_resolved, try, sizeof(interp_resolved) - 1);
-                                break;
-                            }
-                            d = strtok_r(NULL, ":", &sp);
-                        }
-                        free(pc);
-                    }
+                    resolve_in_path(prog_name, interp_resolved, sizeof(interp_resolved));
 
                     if (interp_resolved[0]) {
                         int ai = 0;
@@ -560,83 +675,19 @@ int main(int argc, char **argv) {
                         }
                     }
                 }
+#ifdef __APPLE__
                 // #!/path/to/interpreter — if SIP-protected or hardened, copy+re-sign
                 else {
-                    // Parse interpreter path and optional arg
-                    static char shebang_interp[PATH_MAX];
-                    static char shebang_arg_buf[256];
-                    char *shebang_arg = NULL;
-                    char *sp = strchr(interp, ' ');
-                    if (sp) {
-                        size_t ilen = (size_t)(sp - interp);
-                        if (ilen >= sizeof(shebang_interp)) ilen = sizeof(shebang_interp) - 1;
-                        memcpy(shebang_interp, interp, ilen);
-                        shebang_interp[ilen] = '\0';
-                        char *a = sp + 1;
-                        while (*a == ' ') a++;
-                        if (*a) {
-                            strncpy(shebang_arg_buf, a, sizeof(shebang_arg_buf) - 1);
-                            shebang_arg_buf[sizeof(shebang_arg_buf) - 1] = '\0';
-                            shebang_arg = shebang_arg_buf;
-                        }
-                    } else {
-                        strncpy(shebang_interp, interp, sizeof(shebang_interp) - 1);
-                        shebang_interp[sizeof(shebang_interp) - 1] = '\0';
-                    }
-
-                    // Check if interpreter needs re-signing
-                    int need_resign = (strncmp(shebang_interp, "/usr/", 5) == 0 ||
-                                       strncmp(shebang_interp, "/bin/", 5) == 0 ||
-                                       strncmp(shebang_interp, "/sbin/", 6) == 0);
-                    if (!need_resign)
-                        need_resign = rmp_is_hardened(&ctx, shebang_interp);
-
-                    if (need_resign) {
-                        struct stat interp_sb;
-                        static char cached_interp[PATH_MAX];
-                        int resign_ok = 0;
-
-                        if (stat(shebang_interp, &interp_sb) == 0) {
-                            rmp_cache_path(ctx.cache_dir, shebang_interp,
-                                           cached_interp, sizeof(cached_interp));
-                            if (rmp_cache_valid(cached_interp, interp_sb.st_mtime, interp_sb.st_size) ||
-                                rmp_cache_create(&ctx, shebang_interp, cached_interp,
-                                                 interp_sb.st_mtime, interp_sb.st_size) == 0) {
-                                resign_ok = 1;
-                            }
-                        }
-
-                        if (resign_ok) {
-                            int ai = 0;
-                            exec_argv[ai++] = cached_interp;
-                            if (shebang_arg) exec_argv[ai++] = shebang_arg;
-                            exec_argv[ai++] = cmd_resolved;
-                            for (int i = cmd_start + 1; i < argc && ai < 255; i++)
-                                exec_argv[ai++] = argv[i];
-                            exec_argv[ai] = NULL;
-                            use_rewritten = 1;
-
-                            if (debug_fp) {
-                                fprintf(debug_fp, "[remapper] shebang resign: %s → %s\n",
-                                        shebang_interp, cached_interp);
-                                fprintf(debug_fp, "[remapper] rewritten:");
-                                for (int i = 0; exec_argv[i]; i++)
-                                    fprintf(debug_fp, " %s", exec_argv[i]);
-                                fprintf(debug_fp, "\n");
-                                fflush(debug_fp);
-                            }
-                        } else {
-                            fprintf(stderr,
-                                "[remapper] WARNING: %s has shebang '%s' that needs re-signing\n"
-                                "  Failed to create cached copy. Interposition may NOT work.\n",
-                                cmd_resolved, interp);
-                        }
-                    }
+                    use_rewritten = resolve_sip_shebang(
+                        &ctx, debug_fp, interp, cmd_resolved,
+                        exec_argv, argc, argv, cmd_start);
                 }
+#endif /* __APPLE__ */
             }
         }
     }
 
+#ifdef __APPLE__
     /*** Hardened binary check *********************/
     //
     // If the binary to exec has hardened runtime without the
@@ -669,6 +720,7 @@ int main(int argc, char **argv) {
             }
         }
     }
+#endif /* __APPLE__ */
 
     // Exec the command
     if (use_rewritten) {
