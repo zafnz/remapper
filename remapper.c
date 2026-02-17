@@ -114,14 +114,6 @@ static void usage(const char *prog) {
     exit(1);
 }
 
-// Open debug log for appending (or writing if first call).
-// Returns NULL if debug is not enabled.
-static FILE *open_debug_log(const char *debug_log, const char *mode) {
-    if (!debug_log) return NULL;
-    FILE *fp = fopen(debug_log, mode);
-    return fp;
-}
-
 /*** Main **************************************/
 
 int main(int argc, char **argv) {
@@ -259,6 +251,20 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
+    // Initialize shared context (resolves codesign, creates dirs, writes entitlements)
+    FILE *debug_fp = NULL;
+    if (debug_log) {
+        debug_fp = fopen(debug_log, "w");
+        if (!debug_fp) debug_fp = stderr;
+    }
+    rmp_ctx_t ctx;
+    rmp_ctx_init(&ctx, config_dir, cache_dir, debug_fp);
+
+    if (!ctx.codesign_path[0]) {
+        fprintf(stderr, "Error: cannot find 'codesign' in PATH\n");
+        exit(1);
+    }
+
     /*** Set environment variables *****************/
 
     setenv("RMP_TARGET", target, 1);
@@ -276,19 +282,17 @@ int main(int argc, char **argv) {
 
     /*** Debug output ******************************/
 
-    if (debug_log) {
-        FILE *dfp = open_debug_log(debug_log, "w");
-        if (!dfp) dfp = stderr;
-
-        fprintf(dfp, "[remapper] target:   %s\n", target);
-        fprintf(dfp, "[remapper] mappings: %s\n", mappings_buf);
-        fprintf(dfp, "[remapper] config:   %s\n", config_dir);
-        fprintf(dfp, "[remapper] cache:    %s\n", cache_dir);
-        fprintf(dfp, "[remapper] dylib:    %s\n", dylib_path);
-        fprintf(dfp, "[remapper] command: ");
+    if (debug_fp) {
+        fprintf(debug_fp, "[remapper] target:   %s\n", target);
+        fprintf(debug_fp, "[remapper] mappings: %s\n", mappings_buf);
+        fprintf(debug_fp, "[remapper] config:   %s\n", config_dir);
+        fprintf(debug_fp, "[remapper] cache:    %s\n", cache_dir);
+        fprintf(debug_fp, "[remapper] dylib:    %s\n", dylib_path);
+        fprintf(debug_fp, "[remapper] codesign: %s\n", ctx.codesign_path);
+        fprintf(debug_fp, "[remapper] command: ");
         for (int i = cmd_start; i < argc; i++)
-            fprintf(dfp, " %s", argv[i]);
-        fprintf(dfp, "\n");
+            fprintf(debug_fp, " %s", argv[i]);
+        fprintf(debug_fp, "\n");
 
         // Check dylib arch
         {
@@ -297,7 +301,7 @@ int main(int argc, char **argv) {
             if (proc.fp) {
                 char line[1024];
                 if (fgets(line, sizeof(line), proc.fp))
-                    fprintf(dfp, "[remapper] dylib:    %s", line);
+                    fprintf(debug_fp, "[remapper] dylib:    %s", line);
                 rmp_pipe_close(&proc);
             }
         }
@@ -319,29 +323,28 @@ int main(int argc, char **argv) {
             if (proc.fp) {
                 char line[1024];
                 if (fgets(line, sizeof(line), proc.fp))
-                    fprintf(dfp, "[remapper] binary:   %s", line);
+                    fprintf(debug_fp, "[remapper] binary:   %s", line);
                 rmp_pipe_close(&proc);
             }
 
             char *cs_argv[] = {"codesign", "-dvvv", resolved_cmd, NULL};
-            rmp_pipe_t proc2 = rmp_pipe_open("/usr/bin/codesign", cs_argv);
+            rmp_pipe_t proc2 = rmp_pipe_open(ctx.codesign_path, cs_argv);
             if (proc2.fp) {
                 char line[1024];
                 int found_any = 0;
                 while (fgets(line, sizeof(line), proc2.fp)) {
                     if (strstr(line, "runtime") || strstr(line, "Signature")) {
-                        fprintf(dfp, "[remapper] codesign: %s", line);
+                        fprintf(debug_fp, "[remapper] codesign: %s", line);
                         found_any = 1;
                     }
                 }
                 if (!found_any)
-                    fprintf(dfp, "[remapper] codesign: not signed\n");
+                    fprintf(debug_fp, "[remapper] codesign: not signed\n");
                 rmp_pipe_close(&proc2);
             }
         }
 
-        fflush(dfp);
-        if (dfp != stderr) fclose(dfp);
+        fflush(debug_fp);
     }
 
     /*** Shebang resolution ************************/
@@ -445,29 +448,82 @@ int main(int argc, char **argv) {
 
                         use_rewritten = 1;
 
-                        if (debug_log) {
-                            FILE *dfp = open_debug_log(debug_log, "a");
-                            if (!dfp) dfp = stderr;
-                            fprintf(dfp, "[remapper] shebang:  '#!/usr/bin/env %s' → %s\n",
+                        if (debug_fp) {
+                            fprintf(debug_fp, "[remapper] shebang:  '#!/usr/bin/env %s' → %s\n",
                                     prog_name, interp_resolved);
-                            fprintf(dfp, "[remapper] rewritten:");
+                            fprintf(debug_fp, "[remapper] rewritten:");
                             for (int i = 0; exec_argv[i]; i++)
-                                fprintf(dfp, " %s", exec_argv[i]);
-                            fprintf(dfp, "\n");
-                            fflush(dfp);
-                            if (dfp != stderr) fclose(dfp);
+                                fprintf(debug_fp, " %s", exec_argv[i]);
+                            fprintf(debug_fp, "\n");
+                            fflush(debug_fp);
                         }
                     }
                 }
-                // #!/path/to/interpreter — check if SIP-protected
+                // #!/path/to/interpreter — if SIP-protected, copy+re-sign
                 else if (strncmp(interp, "/usr/", 5) == 0 ||
                          strncmp(interp, "/bin/", 5) == 0 ||
                          strncmp(interp, "/sbin/", 6) == 0) {
-                    fprintf(stderr,
-                        "[remapper] WARNING: %s uses shebang '%s'\n"
-                        "  This interpreter is SIP-protected and will strip DYLD_INSERT_LIBRARIES.\n"
-                        "  Interposition will NOT work.\n",
-                        cmd_resolved, shebang + 2);
+                    // Parse interpreter path and optional arg
+                    static char sip_interp[PATH_MAX];
+                    static char sip_arg_buf[256];
+                    char *sip_arg = NULL;
+                    char *sp = strchr(interp, ' ');
+                    if (sp) {
+                        size_t ilen = (size_t)(sp - interp);
+                        if (ilen >= sizeof(sip_interp)) ilen = sizeof(sip_interp) - 1;
+                        memcpy(sip_interp, interp, ilen);
+                        sip_interp[ilen] = '\0';
+                        char *a = sp + 1;
+                        while (*a == ' ') a++;
+                        if (*a) {
+                            strncpy(sip_arg_buf, a, sizeof(sip_arg_buf) - 1);
+                            sip_arg_buf[sizeof(sip_arg_buf) - 1] = '\0';
+                            sip_arg = sip_arg_buf;
+                        }
+                    } else {
+                        strncpy(sip_interp, interp, sizeof(sip_interp) - 1);
+                        sip_interp[sizeof(sip_interp) - 1] = '\0';
+                    }
+
+                    struct stat sip_sb;
+                    static char cached_interp[PATH_MAX];
+                    int sip_ok = 0;
+
+                    if (stat(sip_interp, &sip_sb) == 0) {
+                        rmp_cache_path(ctx.cache_dir, sip_interp,
+                                       cached_interp, sizeof(cached_interp));
+                        if (rmp_cache_valid(cached_interp, sip_sb.st_mtime, sip_sb.st_size) ||
+                            rmp_cache_create(&ctx, sip_interp, cached_interp,
+                                             sip_sb.st_mtime, sip_sb.st_size) == 0) {
+                            sip_ok = 1;
+                        }
+                    }
+
+                    if (sip_ok) {
+                        int ai = 0;
+                        exec_argv[ai++] = cached_interp;
+                        if (sip_arg) exec_argv[ai++] = sip_arg;
+                        exec_argv[ai++] = cmd_resolved;
+                        for (int i = cmd_start + 1; i < argc && ai < 255; i++)
+                            exec_argv[ai++] = argv[i];
+                        exec_argv[ai] = NULL;
+                        use_rewritten = 1;
+
+                        if (debug_fp) {
+                            fprintf(debug_fp, "[remapper] SIP shebang: %s → %s\n",
+                                    sip_interp, cached_interp);
+                            fprintf(debug_fp, "[remapper] rewritten:");
+                            for (int i = 0; exec_argv[i]; i++)
+                                fprintf(debug_fp, " %s", exec_argv[i]);
+                            fprintf(debug_fp, "\n");
+                            fflush(debug_fp);
+                        }
+                    } else {
+                        fprintf(stderr,
+                            "[remapper] WARNING: %s uses SIP-protected shebang '%s'\n"
+                            "  Failed to create cached copy. Interposition may NOT work.\n",
+                            cmd_resolved, interp);
+                    }
                 }
             }
         }
@@ -482,23 +538,14 @@ int main(int argc, char **argv) {
     const char *final_binary = use_rewritten ? exec_argv[0] : cmd_resolved;
 
     if (final_binary[0]) {
-        FILE *ctx_debug = NULL;
-        if (debug_log) {
-            ctx_debug = open_debug_log(debug_log, "a");
-        }
-
-        rmp_ctx_t ctx;
-        rmp_ctx_init(&ctx, config_dir, cache_dir, ctx_debug);
-
         int was_cached = 0;
         const char *resolved = rmp_resolve_hardened(&ctx, final_binary, &was_cached);
 
         if (was_cached) {
-            if (debug_log) {
-                FILE *dfp = ctx_debug ? ctx_debug : stderr;
-                fprintf(dfp, "[remapper] hardened binary detected: %s\n", final_binary);
-                fprintf(dfp, "[remapper] using cached copy: %s\n", resolved);
-                fflush(dfp);
+            if (debug_fp) {
+                fprintf(debug_fp, "[remapper] hardened binary detected: %s\n", final_binary);
+                fprintf(debug_fp, "[remapper] using cached copy: %s\n", resolved);
+                fflush(debug_fp);
             }
 
             // Update the exec target
@@ -513,8 +560,6 @@ int main(int argc, char **argv) {
                 use_rewritten = 1;
             }
         }
-
-        if (ctx_debug && ctx_debug != stderr) fclose(ctx_debug);
     }
 
     // Exec the command

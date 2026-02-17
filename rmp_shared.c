@@ -28,6 +28,45 @@ static const char *get_home_dir(char *buf, size_t bufsize) {
     return NULL;
 }
 
+
+// Resolve a bare filename via $PATH. If `file` contains '/', copy it
+// directly. Otherwise walk $PATH looking for an executable match.
+// Returns 1 on success (result in `out`), 0 on failure.
+int resolve_in_path(const char *file, char *out, size_t outsize) {
+    if (!file || !file[0]) return 0;
+
+    // If it contains '/', treat as a path — just copy it
+    if (strchr(file, '/')) {
+        if (strlen(file) >= outsize) return 0;
+        strcpy(out, file);
+        return 1;
+    }
+
+    const char *path_env = getenv("PATH");
+    if (!path_env) return 0;
+
+    char *path_copy = strdup(path_env);
+    if (!path_copy) return 0;
+
+    char *saveptr = NULL;
+    char *dir = strtok_r(path_copy, ":", &saveptr);
+    while (dir) {
+        size_t needed = strlen(dir) + 1 + strlen(file) + 1;
+        if (needed <= outsize) {
+            snprintf(out, outsize, "%s/%s", dir, file);
+            if (access(out, X_OK) == 0) {
+                free(path_copy);
+                return 1;
+            }
+        }
+        dir = strtok_r(NULL, ":", &saveptr);
+    }
+
+    free(path_copy);
+    return 0;
+}
+
+
 /*** Safe pipe-based process spawning ************/
 
 rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]) {
@@ -186,11 +225,19 @@ void rmp_ctx_init(rmp_ctx_t *ctx, const char *config_dir,
         atomic_write_file(ctx->entitlements_path, ENTITLEMENTS_PLIST,
                           strlen(ENTITLEMENTS_PLIST), 0644);
     }
+
+    // Resolve codesign once
+    if (!resolve_in_path("codesign", ctx->codesign_path,
+                         sizeof(ctx->codesign_path))) {
+        ctx->codesign_path[0] = '\0';
+    }
 }
 
 /*** rmp_is_hardened *****************************/
-
-int rmp_is_hardened(const char *path) {
+// Checks if the binary at `path` has hardened runtime without the
+// allow-dyld-environment-variables entitlement, by invoking `codesign`.
+int rmp_is_hardened(const rmp_ctx_t *ctx, const char *path) {
+    const char *codesign = ctx->codesign_path;
     int fd = open(path, O_RDONLY);
     if (fd < 0) return 0;
 
@@ -206,9 +253,15 @@ int rmp_is_hardened(const char *path) {
         return 0;
     }
 
+    if (codesign == NULL || codesign[0] == '\0') {
+        // If we don't have codesign then we can't resign the binary, so 
+        // fallback to treating it as hardened to avoid silently failing to insert the dylib.
+        return 1;
+    }
+
     // Check for hardened runtime via codesign
     char *cs_argv[] = {"codesign", "-dvvv", (char *)path, NULL};
-    rmp_pipe_t proc = rmp_pipe_open("/usr/bin/codesign", cs_argv);
+    rmp_pipe_t proc = rmp_pipe_open(codesign, cs_argv);
     if (!proc.fp) return 0;
 
     int has_runtime = 0;
@@ -222,7 +275,7 @@ int rmp_is_hardened(const char *path) {
     // Check entitlements
     char *ent_argv[] = {"codesign", "-d", "--entitlements", "-",
                         (char *)path, NULL};
-    rmp_pipe_t proc2 = rmp_pipe_open("/usr/bin/codesign", ent_argv);
+    rmp_pipe_t proc2 = rmp_pipe_open(codesign, ent_argv);
     if (!proc2.fp) return 1;
 
     int has_dyld_ent = 0;
@@ -298,10 +351,18 @@ int rmp_cache_create(rmp_ctx_t *ctx, const char *original,
     chmod(tmp, 0755);
 
     // Re-sign with entitlements
+    if (ctx->codesign_path[0] == '\0') {
+        if (ctx->debug_fp) {
+            fprintf(ctx->debug_fp, "[remapper] cache: codesign not available\n");
+            fflush(ctx->debug_fp);
+        }
+        unlink(tmp);
+        return -1;
+    }
     char *sign_argv[] = {"codesign", "--force", "-s", "-",
                          "--entitlements", ctx->entitlements_path,
                          tmp, NULL};
-    rmp_pipe_t sign_proc = rmp_pipe_open("/usr/bin/codesign", sign_argv);
+    rmp_pipe_t sign_proc = rmp_pipe_open(ctx->codesign_path, sign_argv);
     if (!sign_proc.fp) { unlink(tmp); return -1; }
     char line[256];
     while (fgets(line, sizeof(line), sign_proc.fp)) {
@@ -362,7 +423,7 @@ const char *rmp_resolve_hardened(rmp_ctx_t *ctx, const char *path, int *was_cach
     }
 
     // Check if hardened
-    if (!rmp_is_hardened(path)) {
+    if (!rmp_is_hardened(ctx, path)) {
         if (ctx->debug_fp) {
             fprintf(ctx->debug_fp, "[remapper] not hardened: %s\n", path);
             fflush(ctx->debug_fp);

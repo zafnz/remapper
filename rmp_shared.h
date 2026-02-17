@@ -12,6 +12,7 @@ typedef struct {
     char cache_dir[PATH_MAX];
     char config_dir[PATH_MAX];
     char entitlements_path[PATH_MAX];
+    char codesign_path[PATH_MAX];  // resolved once at init
     FILE *debug_fp; // NULL = no debug logging
 } rmp_ctx_t;
 
@@ -27,7 +28,7 @@ void rmp_ctx_init(rmp_ctx_t *ctx, const char *config_dir,
 // Check if a Mach-O binary has hardened runtime without the
 // allow-dyld-environment-variables entitlement.
 // Returns 1 if it needs re-signing, 0 otherwise.
-int rmp_is_hardened(const char *path);
+int rmp_is_hardened(const rmp_ctx_t *ctx, const char *path);
 
 // Build the cached path for a binary: <cache_dir><original_path>
 void rmp_cache_path(const char *cache_dir, const char *original,
@@ -60,5 +61,7 @@ rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]);
 
 // Close pipe and wait for child. Returns exit status, or -1 on error.
 int rmp_pipe_close(rmp_pipe_t *proc);
+
+int resolve_in_path(const char *file, char *out, size_t outsize);
 
 #endif // RMP_SHARED_H
