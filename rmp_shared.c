@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <pwd.h>
 #include <stdatomic.h>
 #include <mach-o/loader.h>
@@ -25,6 +26,66 @@ static const char *get_home_dir(char *buf, size_t bufsize) {
         return result->pw_dir;
 
     return NULL;
+}
+
+/*** Safe pipe-based process spawning ************/
+
+rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]) {
+    rmp_pipe_t proc = { NULL, -1 };
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return proc;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return proc;
+    }
+
+    if (pid == 0) {
+        // Child: redirect stdout+stderr to pipe
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+        execv(path, argv);
+        // exec failed — write error to stderr (which is the pipe)
+        int e = errno;
+        const char *msg = "execv failed: ";
+        write(STDERR_FILENO, msg, strlen(msg));
+        const char *err = strerror(e);
+        write(STDERR_FILENO, err, strlen(err));
+        write(STDERR_FILENO, "\n", 1);
+        _exit(127);
+    }
+
+    // Parent: read end
+    close(pipefd[1]);
+    proc.fp = fdopen(pipefd[0], "r");
+    if (!proc.fp) {
+        close(pipefd[0]);
+        waitpid(pid, NULL, 0);
+        return proc;
+    }
+    proc.pid = pid;
+    return proc;
+}
+
+int rmp_pipe_close(rmp_pipe_t *proc) {
+    if (!proc || proc->pid < 0) return -1;
+
+    if (proc->fp) {
+        fclose(proc->fp);
+        proc->fp = NULL;
+    }
+
+    int status;
+    if (waitpid(proc->pid, &status, 0) < 0) return -1;
+    proc->pid = -1;
+
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
 }
 
 /*** Entitlements plist **************************/
@@ -146,29 +207,29 @@ int rmp_is_hardened(const char *path) {
     }
 
     // Check for hardened runtime via codesign
-    char cmd[PATH_MAX + 64];
-    snprintf(cmd, sizeof(cmd), "codesign -dvvv '%s' 2>&1", path);
-    FILE *p = popen(cmd, "r");
-    if (!p) return 0;
+    char *cs_argv[] = {"codesign", "-dvvv", (char *)path, NULL};
+    rmp_pipe_t proc = rmp_pipe_open("/usr/bin/codesign", cs_argv);
+    if (!proc.fp) return 0;
 
     int has_runtime = 0;
     char line[1024];
-    while (fgets(line, sizeof(line), p))
+    while (fgets(line, sizeof(line), proc.fp))
         if (strstr(line, "runtime")) has_runtime = 1;
-    pclose(p);
+    rmp_pipe_close(&proc);
 
     if (!has_runtime) return 0;
 
     // Check entitlements
-    snprintf(cmd, sizeof(cmd), "codesign -d --entitlements - '%s' 2>&1", path);
-    p = popen(cmd, "r");
-    if (!p) return 1;
+    char *ent_argv[] = {"codesign", "-d", "--entitlements", "-",
+                        (char *)path, NULL};
+    rmp_pipe_t proc2 = rmp_pipe_open("/usr/bin/codesign", ent_argv);
+    if (!proc2.fp) return 1;
 
     int has_dyld_ent = 0;
-    while (fgets(line, sizeof(line), p))
+    while (fgets(line, sizeof(line), proc2.fp))
         if (strstr(line, "allow-dyld-environment-variables"))
             has_dyld_ent = 1;
-    pclose(p);
+    rmp_pipe_close(&proc2);
 
     return has_dyld_ent ? 0 : 1;
 }
@@ -237,21 +298,19 @@ int rmp_cache_create(rmp_ctx_t *ctx, const char *original,
     chmod(tmp, 0755);
 
     // Re-sign with entitlements
-    char cmd[PATH_MAX * 2 + 256];
-    snprintf(cmd, sizeof(cmd),
-             "codesign --force -s - --entitlements '%s' '%s' 2>&1",
-             ctx->entitlements_path, tmp);
-
-    FILE *p = popen(cmd, "r");
-    if (!p) { unlink(tmp); return -1; }
+    char *sign_argv[] = {"codesign", "--force", "-s", "-",
+                         "--entitlements", ctx->entitlements_path,
+                         tmp, NULL};
+    rmp_pipe_t sign_proc = rmp_pipe_open("/usr/bin/codesign", sign_argv);
+    if (!sign_proc.fp) { unlink(tmp); return -1; }
     char line[256];
-    while (fgets(line, sizeof(line), p)) {
+    while (fgets(line, sizeof(line), sign_proc.fp)) {
         if (ctx->debug_fp) {
             fprintf(ctx->debug_fp, "[remapper] codesign: %s", line);
             fflush(ctx->debug_fp);
         }
     }
-    int ret = pclose(p);
+    int ret = rmp_pipe_close(&sign_proc);
     if (ret != 0) {
         if (ctx->debug_fp) {
             fprintf(ctx->debug_fp, "[remapper] cache: codesign failed (exit %d)\n", ret);

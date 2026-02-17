@@ -291,43 +291,52 @@ int main(int argc, char **argv) {
         fprintf(dfp, "\n");
 
         // Check dylib arch
-        char cmd_buf[PATH_MAX + 64];
-        snprintf(cmd_buf, sizeof(cmd_buf), "file '%s' 2>&1", dylib_path);
-        FILE *p = popen(cmd_buf, "r");
-        if (p) {
-            char line[1024];
-            if (fgets(line, sizeof(line), p))
-                fprintf(dfp, "[remapper] dylib:    %s", line);
-            pclose(p);
+        {
+            char *file_argv[] = {"file", dylib_path, NULL};
+            rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file_argv);
+            if (proc.fp) {
+                char line[1024];
+                if (fgets(line, sizeof(line), proc.fp))
+                    fprintf(dfp, "[remapper] dylib:    %s", line);
+                rmp_pipe_close(&proc);
+            }
         }
 
         // Resolve the target binary and check its arch/signing
-        snprintf(cmd_buf, sizeof(cmd_buf), "which '%s' 2>/dev/null", argv[cmd_start]);
-        p = popen(cmd_buf, "r");
         char resolved_cmd[PATH_MAX] = "";
-        if (p) {
-            if (fgets(resolved_cmd, sizeof(resolved_cmd), p))
-                resolved_cmd[strcspn(resolved_cmd, "\n")] = '\0';
-            pclose(p);
+        {
+            char *which_argv[] = {"which", argv[cmd_start], NULL};
+            rmp_pipe_t proc = rmp_pipe_open("/usr/bin/which", which_argv);
+            if (proc.fp) {
+                if (fgets(resolved_cmd, sizeof(resolved_cmd), proc.fp))
+                    resolved_cmd[strcspn(resolved_cmd, "\n")] = '\0';
+                rmp_pipe_close(&proc);
+            }
         }
         if (resolved_cmd[0]) {
-            snprintf(cmd_buf, sizeof(cmd_buf), "file '%s' 2>&1", resolved_cmd);
-            p = popen(cmd_buf, "r");
-            if (p) {
+            char *file2_argv[] = {"file", resolved_cmd, NULL};
+            rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file2_argv);
+            if (proc.fp) {
                 char line[1024];
-                if (fgets(line, sizeof(line), p))
+                if (fgets(line, sizeof(line), proc.fp))
                     fprintf(dfp, "[remapper] binary:   %s", line);
-                pclose(p);
+                rmp_pipe_close(&proc);
             }
-            snprintf(cmd_buf, sizeof(cmd_buf),
-                     "codesign -dvvv '%s' 2>&1 | grep -E '(runtime|Signature)' || echo 'not signed'",
-                     resolved_cmd);
-            p = popen(cmd_buf, "r");
-            if (p) {
+
+            char *cs_argv[] = {"codesign", "-dvvv", resolved_cmd, NULL};
+            rmp_pipe_t proc2 = rmp_pipe_open("/usr/bin/codesign", cs_argv);
+            if (proc2.fp) {
                 char line[1024];
-                while (fgets(line, sizeof(line), p))
-                    fprintf(dfp, "[remapper] codesign: %s", line);
-                pclose(p);
+                int found_any = 0;
+                while (fgets(line, sizeof(line), proc2.fp)) {
+                    if (strstr(line, "runtime") || strstr(line, "Signature")) {
+                        fprintf(dfp, "[remapper] codesign: %s", line);
+                        found_any = 1;
+                    }
+                }
+                if (!found_any)
+                    fprintf(dfp, "[remapper] codesign: not signed\n");
+                rmp_pipe_close(&proc2);
             }
         }
 

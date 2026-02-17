@@ -145,9 +145,10 @@ static int try_rewrite(const char *path, char *out, size_t outsize) {
         if (fnmatch(g_patterns[i].glob, component, 0) == 0) {
             int n = snprintf(out, outsize, "%s%s", g_target, rest);
             if (n < 0 || (size_t)n >= outsize) continue;
-            if (g_debug)
+            if (g_debug) {
                 fprintf(g_debug_fp, "[remapper] rewrite: '%s' → '%s'\n", path, out);
                 fflush(g_debug_fp);
+            }
             return 1;
         }
     }

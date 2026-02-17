@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -O2
 BUILD   = build
 
-all: $(BUILD)/interpose.dylib $(BUILD)/remapper $(BUILD)/test_interpose $(BUILD)/verify_test_interpose $(BUILD)/hardened_test $(BUILD)/spawn_hardened
+all: $(BUILD)/interpose.dylib $(BUILD)/remapper 
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -29,7 +29,7 @@ $(BUILD)/hardened_test: hardened_test.c | $(BUILD)
 $(BUILD)/spawn_hardened: spawn_hardened.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $<
 
-test: all
+test: all $(BUILD)/test_interpose $(BUILD)/verify_test_interpose $(BUILD)/hardened_test $(BUILD)/spawn_hardened
 	./test.sh
 
 clean:
