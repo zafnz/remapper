@@ -11,26 +11,18 @@ Now `claude-personal` and `claude-work` each get their own separate `~/.claude/`
 
 ## Install
 
-Download the latest binary and put it in your PATH:
-
 ```bash
-mkdir -p ~/.local/bin
-curl -L -o ~/.local/bin/remapper \
-    https://github.com/zafnz/remapper/releases/latest/download/remapper-macos-arm64
-chmod +x ~/.local/bin/remapper
+curl -L https://github.com/zafnz/remapper/releases/latest/download/remapper-macos-arm64 \
+    -o /tmp/remapper && install -Dm755 /tmp/remapper ~/.local/bin/remapper && rm /tmp/remapper
 ```
 
-Make sure `~/.local/bin` is in your PATH (add to `~/.zshrc` if needed):
+Ensure `~/.local/bin` is in your PATH (add to `~/.zshrc` if not already):
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-If macOS blocks the binary on first run, remove the quarantine attribute:
-
-```bash
-xattr -d com.apple.quarantine ~/.local/bin/remapper
-```
+If macOS blocks the binary, run: `xattr -d com.apple.quarantine ~/.local/bin/remapper`
 
 ## Usage
 
