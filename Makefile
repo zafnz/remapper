@@ -47,7 +47,7 @@ test: all $(BUILD)/test_interpose $(BUILD)/verify_test_interpose $(BUILD)/harden
 	./test.sh
 
 deploy:
-	./deploy.sh
+	./deploy.sh $(VERSION)
 
 clean:
 	rm -rf $(BUILD)
