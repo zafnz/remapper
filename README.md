@@ -12,8 +12,9 @@ Now `claude-personal` and `claude-work` each get their own separate `~/.claude/`
 ## Install
 
 ```bash
-curl -L https://github.com/zafnz/remapper/releases/latest/download/remapper-macos-arm64 \
-    -o /tmp/remapper && install -Dm755 /tmp/remapper ~/.local/bin/remapper && rm /tmp/remapper
+mkdir -p ~/.local/bin && curl -L -o ~/.local/bin/remapper \
+    https://github.com/zafnz/remapper/releases/latest/download/remapper-macos-arm64 \
+    && chmod +x ~/.local/bin/remapper
 ```
 
 Ensure `~/.local/bin` is in your PATH (add to `~/.zshrc` if not already):
