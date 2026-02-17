@@ -69,13 +69,30 @@ Use `--` to separate mappings from the command when specifying more than one:
 remapper ~/myenv '~/.config/app*' '~/.local/share/app*' -- myapp --flag
 ```
 
-## Specific Applications
+## FAQs
 
-**Codex GUI:**
+### The program still says it's using `/the/original/path`!
+
+Yes. As far as the program is concerned it is using the unmapped path, it doesn't know that under the hood everything to `/the/original/path` is going to `/wherever/you/said` -- it has no idea. 
+
+### How do I run multiple copies of a GUI app like Codex GUI?
+
+You need to start the program from the terminal:
 ```bash
 remapper ~/.codex-alt '~/.codex*' -- /Applications/Codex.app/Contents/MacOS/Codex
 ```
 (Note: Launching from `codex app` doesn't seem to work)
+
+### Does this work for every program?
+
+Probably not. There are a few ways to bypass it. Doing relative paths, like `open("/Users/me/./app.config")` won't be detected because of the `./`. We _could_ implement functionality to detect that, but \at that point you are basically implementing your own VFS and running it in a container with bind mounts would be definitely easier.
+
+### Does it make it slower?
+
+We've tried throwing 100,000 file operations at it and its within the noise, you can't tell. Under the hood it's a few very optimised functions and a few string operations. It is very doubtful there's a realitic load that would be slower with it.
+
+### Why not just use containers?
+Good question. For a semi-hostile app that really doesn't want to to be manipulated that would be a good idea.
 
 ## Environment variables
 
