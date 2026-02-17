@@ -19,13 +19,10 @@
 #include <sys/wait.h>
 #include <pwd.h>
 #include <stdatomic.h>
-#ifdef __APPLE__
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
 #include <copyfile.h>
-#endif
 
-#ifdef __APPLE__
 // Thread-safe home directory lookup: try $HOME, fall back to getpwuid_r.
 static const char *get_home_dir(char *buf, size_t bufsize) {
     const char *home = getenv("HOME");
@@ -37,7 +34,6 @@ static const char *get_home_dir(char *buf, size_t bufsize) {
 
     return NULL;
 }
-#endif
 
 
 // Resolve a bare filename via $PATH. If `file` contains '/', copy it
@@ -80,7 +76,7 @@ int resolve_in_path(const char *file, char *out, size_t outsize) {
 
 /*** Safe pipe-based process spawning ************/
 
-rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]) {
+rmp_pipe_t rmp_pipe_open(const char *path, const char *const argv[]) {
     rmp_pipe_t proc = { NULL, -1 };
 
     int pipefd[2];
@@ -99,7 +95,7 @@ rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]) {
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
-        execv(path, argv);
+        execv(path, (char *const *)argv);
         // exec failed — write error to stderr (which is the pipe)
         // Assign to suppress GCC's warn_unused_result after fork
         int e = errno;
@@ -155,8 +151,7 @@ void rmp_mkdirs(const char *path, mode_t mode) {
     mkdir(tmp, mode);
 }
 
-/*** macOS-only: hardened binary cache ************/
-#ifdef __APPLE__
+/*** Hardened binary cache *************************/
 
 // Atomic counter for unique temp file names (thread-safe)
 static _Atomic int g_tmp_seq = 0;
@@ -275,7 +270,7 @@ int rmp_is_hardened(const rmp_ctx_t *ctx, const char *path) {
     }
 
     // Check for hardened runtime via codesign
-    char *cs_argv[] = {"codesign", "-dvvv", (char *)path, NULL};
+    const char *cs_argv[] = {"codesign", "-dvvv", path, NULL};
     rmp_pipe_t proc = rmp_pipe_open(codesign, cs_argv);
     if (!proc.fp) return 0;
 
@@ -288,8 +283,8 @@ int rmp_is_hardened(const rmp_ctx_t *ctx, const char *path) {
     if (!has_runtime) return 0;
 
     // Check entitlements
-    char *ent_argv[] = {"codesign", "-d", "--entitlements", "-",
-                        (char *)path, NULL};
+    const char *ent_argv[] = {"codesign", "-d", "--entitlements", "-",
+                              path, NULL};
     rmp_pipe_t proc2 = rmp_pipe_open(codesign, ent_argv);
     if (!proc2.fp) return 1;
 
@@ -374,9 +369,9 @@ int rmp_cache_create(rmp_ctx_t *ctx, const char *original,
         unlink(tmp);
         return -1;
     }
-    char *sign_argv[] = {"codesign", "--force", "-s", "-",
-                         "--entitlements", ctx->entitlements_path,
-                         tmp, NULL};
+    const char *sign_argv[] = {"codesign", "--force", "-s", "-",
+                               "--entitlements", ctx->entitlements_path,
+                               tmp, NULL};
     rmp_pipe_t sign_proc = rmp_pipe_open(ctx->codesign_path, sign_argv);
     if (!sign_proc.fp) { unlink(tmp); return -1; }
     char line[256];
@@ -459,5 +454,3 @@ const char *rmp_resolve_hardened(rmp_ctx_t *ctx, const char *path, int *was_cach
 
     return path;
 }
-
-#endif /* __APPLE__ */
