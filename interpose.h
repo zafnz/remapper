@@ -99,7 +99,7 @@ int try_rewrite(const char *path, char *out, size_t outsize);
 #define REWRITE_ABS_F(varname, path, func) \
     char varname##_buf[PATH_MAX]; \
     const char *varname; \
-    if ((path) && (path)[0] == '/' && \
+    if ((path)[0] == '/' && \
         try_rewrite((path), varname##_buf, sizeof(varname##_buf))) { \
         if ((func) && g_debug) \
             fprintf(g_debug_fp, "[remapper] %s('%s' => '%s')\n", \

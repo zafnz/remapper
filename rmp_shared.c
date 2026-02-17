@@ -101,12 +101,13 @@ rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]) {
         close(pipefd[1]);
         execv(path, argv);
         // exec failed — write error to stderr (which is the pipe)
+        // Assign to suppress GCC's warn_unused_result after fork
         int e = errno;
         const char *msg = "execv failed: ";
-        write(STDERR_FILENO, msg, strlen(msg));
+        __attribute__((unused)) ssize_t r1 = write(STDERR_FILENO, msg, strlen(msg));
         const char *err = strerror(e);
-        write(STDERR_FILENO, err, strlen(err));
-        write(STDERR_FILENO, "\n", 1);
+        __attribute__((unused)) ssize_t r2 = write(STDERR_FILENO, err, strlen(err));
+        __attribute__((unused)) ssize_t r3 = write(STDERR_FILENO, "\n", 1);
         _exit(127);
     }
 
@@ -138,9 +139,6 @@ int rmp_pipe_close(rmp_pipe_t *proc) {
     return -1;
 }
 
-// Atomic counter for unique temp file names (thread-safe)
-static _Atomic int g_tmp_seq = 0;
-
 /*** rmp_mkdirs **********************************/
 
 void rmp_mkdirs(const char *path, mode_t mode) {
@@ -156,6 +154,12 @@ void rmp_mkdirs(const char *path, mode_t mode) {
     }
     mkdir(tmp, mode);
 }
+
+/*** macOS-only: hardened binary cache ************/
+#ifdef __APPLE__
+
+// Atomic counter for unique temp file names (thread-safe)
+static _Atomic int g_tmp_seq = 0;
 
 // Write data to a temp file and atomically rename into place.
 // Avoids partial reads if two processes race.
@@ -180,9 +184,6 @@ static int atomic_write_file(const char *path, const char *data, size_t len, mod
     }
     return 0;
 }
-
-/*** macOS-only: hardened binary cache ************/
-#ifdef __APPLE__
 
 /*** Entitlements plist **************************/
 

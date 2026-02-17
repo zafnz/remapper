@@ -3,12 +3,15 @@
 # deploy.sh - Tag, push, create a GitHub release, and upload the binary.
 #
 # Usage:
-#   ./deploy.sh          # auto-increment patch version (v0.0.1 → v0.0.2)
-#   ./deploy.sh v1.2.3   # use an explicit version
+#   ./deploy.sh                    # auto-increment patch version (v0.0.1 → v0.0.2)
+#   ./deploy.sh v1.2.3             # use an explicit version
+#   ./deploy.sh --docker-linux     # also build and include Linux binary via Docker
+#   ./deploy.sh --docker-linux v1.2.3
 #
 # Prerequisites:
 #   - Clean working tree (everything committed and pushed)
 #   - gh CLI authenticated with GitHub
+#   - Docker installed (if using --docker-linux)
 #
 set -euo pipefail
 
@@ -23,6 +26,19 @@ warn() { echo -e "${YELLOW}$1${NC}"; }
 
 BUILD="build"
 BINARY="$BUILD/remapper"
+DOCKER_LINUX=0
+
+########################################
+# 0. Parse flags
+########################################
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --docker-linux) DOCKER_LINUX=1 ;;
+        *) POSITIONAL+=("$arg") ;;
+    esac
+done
+set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 
 ########################################
 # 1. Ensure working tree is clean
@@ -88,9 +104,9 @@ fi
 info "Version: $NEW_VERSION"
 
 ########################################
-# 4. Build the binary
+# 4. Build the macOS binary
 ########################################
-info "Building..."
+info "Building macOS binary..."
 make clean
 make
 
@@ -100,11 +116,41 @@ fi
 
 # Determine architecture for the release asset name
 ARCH=$(uname -m)
-ASSET_NAME="remapper-macos-${ARCH}"
-ASSET_PATH="$BUILD/$ASSET_NAME"
-cp "$BINARY" "$ASSET_PATH"
+MACOS_ASSET="$BUILD/remapper-macos-${ARCH}"
+cp "$BINARY" "$MACOS_ASSET"
 
-info "Built: $ASSET_PATH ($(du -h "$ASSET_PATH" | cut -f1 | xargs))"
+info "Built: $MACOS_ASSET ($(du -h "$MACOS_ASSET" | cut -f1 | xargs))"
+
+ASSETS=("$MACOS_ASSET#remapper (macOS $ARCH)")
+
+########################################
+# 4b. Build the Linux binary (optional)
+########################################
+if [ "$DOCKER_LINUX" -eq 1 ]; then
+    info "Building Linux binary via Docker..."
+
+    LINUX_ARCH=$(docker run --rm ubuntu:24.04 uname -m)
+    LINUX_ASSET="$BUILD/remapper-linux-${LINUX_ARCH}"
+
+    docker run --rm -v "$(pwd)":/src -w /src ubuntu:24.04 bash -c '
+        apt-get update -qq && apt-get install -y -qq gcc make binutils >/dev/null 2>&1
+        make clean && make' || die "Linux Docker build failed."
+
+    if [ ! -f "$BINARY" ]; then
+        die "Linux build failed: $BINARY not found."
+    fi
+
+    cp "$BINARY" "$LINUX_ASSET"
+    info "Built: $LINUX_ASSET ($(du -h "$LINUX_ASSET" | cut -f1 | xargs))"
+
+    ASSETS+=("$LINUX_ASSET#remapper (Linux $LINUX_ARCH)")
+
+    # Rebuild macOS so the local build dir is back to native
+    info "Rebuilding macOS binary..."
+    make clean
+    make
+    cp "$BINARY" "$MACOS_ASSET"
+fi
 
 ########################################
 # 5. Tag and push
@@ -121,7 +167,7 @@ gh release create "$NEW_VERSION" \
     --draft \
     --title "$NEW_VERSION" \
     --generate-notes \
-    "$ASSET_PATH#remapper (macOS $ARCH)"
+    "${ASSETS[@]}"
 
 RELEASE_URL=$(gh release view "$NEW_VERSION" --json url -q '.url')
 info "Done! Draft release created: $RELEASE_URL"
