@@ -170,6 +170,9 @@ int main(int argc, char **argv) {
     // argv[arg_idx] = target directory
     char *target = make_absolute(argv[arg_idx]);
 
+    // Create target directory if it doesn't exist
+    rmp_mkdirs(target, 0755);
+
     // Find '--' separator
     int sep_idx = -1;
     for (int i = arg_idx + 1; i < argc; i++) {

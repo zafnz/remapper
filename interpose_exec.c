@@ -130,12 +130,13 @@ done:
     return result;
 }
 
-/*** SIP-protected shebang resolution *************/
+/*** Shebang interpreter resolution ****************/
 //
-// When exec/spawn targets a script whose #! interpreter lives under
-// /usr/, /bin/, or /sbin/, macOS SIP strips DYLD_INSERT_LIBRARIES.
-// We detect this before the kernel sees the script, copy+re-sign the
-// interpreter to the cache, and exec the cached copy directly.
+// When exec/spawn targets a script whose #! interpreter is either
+// SIP-protected (/usr/, /bin/, /sbin/) or has hardened runtime, the
+// interpreter would strip DYLD_INSERT_LIBRARIES. We detect this before
+// the kernel sees the script, copy+re-sign the interpreter to the
+// cache, and exec the cached copy directly.
 
 static int is_sip_path(const char *path) {
     return (strncmp(path, "/usr/", 5) == 0 ||
@@ -143,11 +144,12 @@ static int is_sip_path(const char *path) {
             strncmp(path, "/sbin/", 6) == 0);
 }
 
-// Check if `path` is a script with a SIP-protected shebang.
-// If so, copy+re-sign the interpreter and return its cached path (strdup'd).
+// Check if `path` is a script with a shebang interpreter that needs re-signing
+// (SIP-protected or hardened runtime). If so, copy+re-sign the interpreter and
+// return its cached path (strdup'd).
 // *shebang_arg is set to the optional shebang argument (strdup'd), or NULL.
-// Returns NULL if not a SIP script or on failure.
-static const char *resolve_sip_shebang(const char *path, char **shebang_arg) {
+// Returns NULL if no re-signing needed or on failure.
+static const char *resolve_shebang_interp(const char *path, char **shebang_arg) {
     *shebang_arg = NULL;
     if (!path || g_num_patterns == 0) return NULL;
     if (g_resolving) return NULL;
@@ -267,7 +269,7 @@ static int my_posix_spawn(pid_t *pid, const char *path,
     }
     // Check for shebang needing re-signing (SIP or hardened interpreter)
     char *shebang_arg = NULL;
-    const char *cached_interp = resolve_sip_shebang(path, &shebang_arg);
+    const char *cached_interp = resolve_shebang_interp(path, &shebang_arg);
     if (cached_interp) {
         char *new_argv[256];
         sip_build_argv(new_argv, 256, cached_interp, shebang_arg, path, argv);
@@ -295,9 +297,9 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
             free((void *)actual);
             return ret;
         }
-        // Check for SIP-protected shebang
+        // Check for shebang needing re-signing
         char *shebang_arg = NULL;
-        const char *cached_interp = resolve_sip_shebang(resolved_path, &shebang_arg);
+        const char *cached_interp = resolve_shebang_interp(resolved_path, &shebang_arg);
         if (cached_interp) {
             char *new_argv[256];
             sip_build_argv(new_argv, 256, cached_interp, shebang_arg, resolved_path, argv);
@@ -321,9 +323,9 @@ static int my_execve(const char *path, char *const argv[], char *const envp[]) {
         RMP_DEBUG("execve: %s → %s (hardened)", path, actual);
         return execve(actual, argv, envp);
     }
-    // Check for SIP-protected shebang
+    // Check for shebang needing re-signing
     char *shebang_arg = NULL;
-    const char *cached_interp = resolve_sip_shebang(path, &shebang_arg);
+    const char *cached_interp = resolve_shebang_interp(path, &shebang_arg);
     if (cached_interp) {
         char *new_argv[256];
         sip_build_argv(new_argv, 256, cached_interp, shebang_arg, path, argv);
@@ -341,9 +343,9 @@ static int my_execv(const char *path, char *const argv[]) {
         RMP_DEBUG("execv: %s → %s (hardened)", path, actual);
         return execv(actual, argv);
     }
-    // Check for SIP-protected shebang
+    // Check for shebang needing re-signing
     char *shebang_arg = NULL;
-    const char *cached_interp = resolve_sip_shebang(path, &shebang_arg);
+    const char *cached_interp = resolve_shebang_interp(path, &shebang_arg);
     if (cached_interp) {
         char *new_argv[256];
         sip_build_argv(new_argv, 256, cached_interp, shebang_arg, path, argv);
@@ -363,9 +365,9 @@ static int my_execvp(const char *file, char *const argv[]) {
             RMP_DEBUG("execvp: %s → %s (hardened)", file, actual);
             return execv(actual, argv);
         }
-        // Check for SIP-protected shebang
+        // Check for shebang needing re-signing
         char *shebang_arg = NULL;
-        const char *cached_interp = resolve_sip_shebang(resolved_path, &shebang_arg);
+        const char *cached_interp = resolve_shebang_interp(resolved_path, &shebang_arg);
         if (cached_interp) {
             char *new_argv[256];
             sip_build_argv(new_argv, 256, cached_interp, shebang_arg, resolved_path, argv);
