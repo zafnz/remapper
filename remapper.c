@@ -33,7 +33,29 @@
 #include <sys/types.h>
 #include <pwd.h>
 #include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <errno.h>
 #include "rmp_shared.h"
+
+/*
+ * The interpose.dylib is embedded inside this binary at build time using
+ * the linker flag: -sectcreate __DATA __interpose_lib <dylib-file>
+ *
+ * This means `remapper` is a single self-contained binary -- no need to
+ * keep interpose.dylib alongside it.  On first run (or when the embedded
+ * version changes), we extract the dylib to $RMP_CONFIG/interpose.dylib
+ * so that DYLD_INSERT_LIBRARIES can load it from disk.
+ *
+ * Why not load it directly from memory?  DYLD_INSERT_LIBRARIES requires
+ * a filesystem path -- the kernel needs to mmap the dylib from a real file.
+ *
+ * We use getsectiondata() to get a pointer to the embedded blob and its
+ * size, then write it to disk only when the on-disk copy is missing or
+ * has a different size (i.e., after rebuilding remapper with a new dylib).
+ */
+
+/* Declared by the linker -- the Mach-O header of this executable */
+extern const struct mach_header_64 _mh_execute_header;
 
 /*** Helpers ***********************************/
 
@@ -230,25 +252,96 @@ int main(int argc, char **argv) {
         snprintf(cache_dir, sizeof(cache_dir), "%s/cache", config_dir);
     }
 
-    // Locate the interpose dylib next to this executable
-    char exe_path[PATH_MAX];
-    uint32_t exe_size = sizeof(exe_path);
-    if (_NSGetExecutablePath(exe_path, &exe_size) != 0) {
-        fprintf(stderr, "Error: cannot determine executable path\n");
+    /*** Extract embedded interpose.dylib **********/
+    //
+    // The dylib is embedded in this binary's __DATA,__interpose_lib section
+    // (put there at build time by the linker's -sectcreate flag).
+    //
+    // We extract it to: $RMP_CONFIG/interpose.dylib
+    //
+    // We only rewrite the file when:
+    //   - it doesn't exist on disk yet (first run), OR
+    //   - its size differs from the embedded blob (remapper was rebuilt)
+    //
+    // This avoids unnecessary writes on every invocation while ensuring
+    // an updated remapper binary always deploys its matching dylib.
+
+    // Step 1: Read the embedded dylib blob from our own Mach-O section.
+    //         getsectiondata() returns a pointer into our already-mapped
+    //         executable image -- no allocation or I/O needed.
+    unsigned long embed_size = 0;
+    const uint8_t *embed_data = getsectiondata(
+        &_mh_execute_header, "__DATA", "__interpose_lib", &embed_size);
+
+    if (!embed_data || embed_size == 0) {
+        fprintf(stderr,
+            "Error: no embedded interpose.dylib found in this binary.\n"
+            "  The binary may have been built without -sectcreate.\n");
         exit(1);
     }
-    char real_exe[PATH_MAX];
-    if (!realpath(exe_path, real_exe)) {
-        strncpy(real_exe, exe_path, sizeof(real_exe) - 1);
-    }
 
-    char *exe_dir = dirname(real_exe);
+    // Step 2: Determine the output path: $RMP_CONFIG/interpose.dylib
     char dylib_path[PATH_MAX];
-    snprintf(dylib_path, sizeof(dylib_path), "%s/interpose.dylib", exe_dir);
+    snprintf(dylib_path, sizeof(dylib_path), "%s/interpose.dylib", config_dir);
 
-    if (access(dylib_path, R_OK) != 0) {
-        fprintf(stderr, "Error: cannot find interpose.dylib at %s\n", dylib_path);
-        exit(1);
+    // Step 3: Check if the on-disk copy is already up to date.
+    //         Compare file size against the embedded blob size -- if they
+    //         match, the dylib hasn't changed and we skip the write.
+    int need_extract = 0;
+    struct stat dylib_sb;
+    if (stat(dylib_path, &dylib_sb) != 0) {
+        // File doesn't exist -- need to create it
+        need_extract = 1;
+    } else if ((unsigned long)dylib_sb.st_size != embed_size) {
+        // File exists but size differs -- remapper was rebuilt with a
+        // new dylib, so overwrite the stale copy
+        need_extract = 1;
+    }
+
+    // Step 4: Write the embedded dylib to disk if needed.
+    //         We write to a temp file and rename() into place so that
+    //         a concurrent remapper invocation never sees a half-written
+    //         dylib (rename is atomic on the same filesystem).
+    if (need_extract) {
+        // Ensure the config directory exists
+        rmp_mkdirs(config_dir, 0755);
+
+        // Write to a temp file first, then atomically rename into place
+        char dylib_tmp[PATH_MAX];
+        snprintf(dylib_tmp, sizeof(dylib_tmp), "%s.tmp.%d", dylib_path, getpid());
+
+        int dfd = open(dylib_tmp, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+        if (dfd < 0) {
+            fprintf(stderr, "Error: cannot write %s: %s\n",
+                    dylib_tmp, strerror(errno));
+            exit(1);
+        }
+
+        // Write the entire blob in a loop to handle partial writes
+        const uint8_t *p = embed_data;
+        unsigned long remaining = embed_size;
+        while (remaining > 0) {
+            ssize_t written = write(dfd, p, remaining);
+            if (written <= 0) {
+                fprintf(stderr, "Error: write to %s failed: %s\n",
+                        dylib_tmp, strerror(errno));
+                close(dfd);
+                unlink(dylib_tmp);
+                exit(1);
+            }
+            p += written;
+            remaining -= (unsigned long)written;
+        }
+        close(dfd);
+
+        // Atomic rename: if two remapper processes race, the last one
+        // wins (both have identical content, so this is harmless)
+        if (rename(dylib_tmp, dylib_path) != 0) {
+            fprintf(stderr, "Error: cannot install %s: %s\n",
+                    dylib_path, strerror(errno));
+            unlink(dylib_tmp);
+            exit(1);
+        }
     }
 
     // Initialize shared context (resolves codesign, creates dirs, writes entitlements)

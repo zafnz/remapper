@@ -108,7 +108,7 @@ Scripts with shebangs pointing to SIP-protected paths (`/usr/bin/env`, `/bin/sh`
 make
 ```
 
-This produces `build/remapper` and `build/interpose.dylib`. Keep them in the same directory.
+This produces a single self-contained `build/remapper` binary. The `interpose.dylib` is embedded inside it and automatically extracted to `~/.remapper/interpose.dylib` on first run.
 
 
 ## Intercepted system calls

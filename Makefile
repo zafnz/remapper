@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -O2
 BUILD   = build
 
-all: $(BUILD)/interpose.dylib $(BUILD)/remapper 
+all: $(BUILD)/interpose.dylib $(BUILD)/remapper
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -10,11 +10,17 @@ $(BUILD):
 $(BUILD)/rmp_shared.o: rmp_shared.c rmp_shared.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ rmp_shared.c
 
+# Build the dylib first (intermediate artifact, not installed separately)
 $(BUILD)/interpose.dylib: interpose.c $(BUILD)/rmp_shared.o rmp_shared.h | $(BUILD)
 	$(CC) $(CFLAGS) -dynamiclib -o $@ interpose.c $(BUILD)/rmp_shared.o
 
-$(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o rmp_shared.h | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ remapper.c $(BUILD)/rmp_shared.o
+# Embed interpose.dylib into the remapper binary as a Mach-O section.
+# At runtime, remapper reads this section with getsectiondata() and writes
+# the dylib out to $RMP_CONFIG/interpose.dylib on first run (or when stale).
+# This means the user only needs to distribute/install a single file.
+$(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose.dylib rmp_shared.h | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ remapper.c $(BUILD)/rmp_shared.o \
+		-Wl,-sectcreate,__DATA,__interpose_lib,$(BUILD)/interpose.dylib
 
 $(BUILD)/test_interpose: test_interpose.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $<
