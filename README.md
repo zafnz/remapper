@@ -1,6 +1,6 @@
 # remapper
 
-Redirect filesystem paths for any program on macOS. Run multiple instances of the same application, each with its own isolated configuration directory.
+Redirect filesystem paths for any program on macOS. Run multiple instances of the same application, each with its own isolated configuration directory. **Does not use symlinks** so programs won't clobber each other. This works by catching the programs read(), write(), etc. calls and redirecting them. 
 
 ```bash
 alias claude-personal='remapper ~/claude-personal "~/.claude*" claude'
