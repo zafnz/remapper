@@ -65,12 +65,28 @@ echo "Installed to $INSTALL_DIR/remapper"
 case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
     *)
-        echo ""
-        echo "Note: $INSTALL_DIR is not in your PATH."
-        echo "Add it with:"
-        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
-        echo ""
-        echo "To make this permanent, add that line to your ~/.bashrc or ~/.zshrc"
+        EXPORT_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
+        ADDED=false
+        for RC_FILE in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+            if [ -f "$RC_FILE" ]; then
+                if ! grep -qF "$INSTALL_DIR" "$RC_FILE" 2>/dev/null; then
+                    echo "" >> "$RC_FILE"
+                    echo "# Added by remapper installer" >> "$RC_FILE"
+                    echo "$EXPORT_LINE" >> "$RC_FILE"
+                    echo "Added $INSTALL_DIR to PATH in $RC_FILE"
+                    ADDED=true
+                else
+                    ADDED=true
+                fi
+            fi
+        done
+        if [ "$ADDED" = false ]; then
+            # No rc file found, create .profile
+            echo "" >> "$HOME/.profile"
+            echo "# Added by remapper installer" >> "$HOME/.profile"
+            echo "$EXPORT_LINE" >> "$HOME/.profile"
+            echo "Added $INSTALL_DIR to PATH in ~/.profile"
+        fi
         ;;
 esac
 
@@ -105,4 +121,4 @@ if [ "$OS" = "Linux" ] && [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_u
 fi
 
 echo ""
-echo "Done!"
+echo "Done! Open a new terminal to begin using remapper."
