@@ -12,26 +12,12 @@ Now `claude-personal` and `claude-work` each get their own separate `~/.claude/`
 
 ## Install
 
-**macOS**
+**Any OS**
 ```bash
-mkdir -p ~/.local/bin && curl -L -o ~/.local/bin/remapper \
-    https://github.com/zafnz/remapper/releases/latest/download/remapper-Darwin-arm64 \
-    && chmod +x ~/.local/bin/remapper
-```
-**Linux (x86_64 / arm64)**
-```bash
-mkdir -p ~/.local/bin && curl -L -o ~/.local/bin/remapper \
-    https://github.com/zafnz/remapper/releases/latest/download/remapper-Linux-x86_64 \
-    && chmod +x ~/.local/bin/remapper
+curl -fsSL https://github.com/zafnz/remapper/releases/latest/download/install.sh | sh
 ```
 
-Ensure `~/.local/bin` is in your PATH (add to `~/.zshrc` or `~/.bashrc` if not already):
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-If macOS blocks the binary, run: `xattr -d com.apple.quarantine ~/.local/bin/remapper`
+For **[Manual Installs](#manual-install)** see below.
 
 ## Usage
 
@@ -107,6 +93,38 @@ On **macOS**, the overhead is negligible. The interposer adds a few string compa
 
 ### Why not just use containers?
 Good question. For a semi-hostile app that really doesn't want to to be manipulated that would be a good idea.
+
+## Manual Installs
+To install without using the install.sh script:
+
+**macOS**
+```bash
+mkdir -p ~/.local/bin && curl -L -o ~/.local/bin/remapper \
+    https://github.com/zafnz/remapper/releases/latest/download/remapper-Darwin-arm64 \
+    && chmod +x ~/.local/bin/remapper
+```
+**Linux (x86_64 / arm64)**
+```bash
+mkdir -p ~/.local/bin && curl -L -o ~/.local/bin/remapper \
+    https://github.com/zafnz/remapper/releases/latest/download/remapper-Linux-x86_64 \
+    && chmod +x ~/.local/bin/remapper
+```
+
+**Linux (ARM / Apple Silicon)**
+```bash
+mkdir -p ~/.local/bin && curl -L -o ~/.local/bin/remapper \
+    https://github.com/zafnz/remapper/releases/latest/download/remapper-Linux-aarch64 \
+    && chmod +x ~/.local/bin/remapper
+```
+
+Ensure `~/.local/bin` is in your PATH (add to `~/.zshrc` or `~/.bashrc` if not already):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+If macOS blocks the binary, run: `xattr -d com.apple.quarantine ~/.local/bin/remapper`
+
 
 ## Environment variables
 

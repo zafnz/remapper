@@ -29,3 +29,55 @@ jobs:
 
       - name: Run tests
         run: make test
+
+  apparmor:
+    name: AppArmor integration test
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y gcc make binutils
+
+      - name: Build
+        run: make
+
+      - name: Enable AppArmor restriction
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+
+      - name: Verify remapper fails without profile
+        run: |
+          TESTHOME=$(mktemp -d)
+          mkdir -p "$TESTHOME/.dummy-test"
+          echo "test" > "$TESTHOME/.dummy-test/data.txt"
+          TARGET=$(mktemp -d)
+          mkdir -p "$TARGET/.dummy-test"
+          echo "remapped" > "$TARGET/.dummy-test/data.txt"
+          OUTPUT=$(HOME="$TESTHOME" ./build/remapper "$TARGET" "$TESTHOME/.dummy*" -- cat "$TESTHOME/.dummy-test/data.txt" 2>&1 || true)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "AppArmor is blocking"
+          echo "PASS: remapper correctly detects AppArmor restriction"
+
+      - name: Install AppArmor profile
+        run: |
+          sudo ./build/remapper --install-apparmor
+          echo "PASS: AppArmor profile installed"
+          ls -la /etc/apparmor.d/ | grep remapper
+
+      - name: Verify remapper works with profile
+        run: |
+          TESTHOME=$(mktemp -d)
+          mkdir -p "$TESTHOME/.dummy-test"
+          echo "original" > "$TESTHOME/.dummy-test/data.txt"
+          TARGET=$(mktemp -d)
+          mkdir -p "$TARGET/.dummy-test"
+          echo "remapped" > "$TARGET/.dummy-test/data.txt"
+          RESULT=$(HOME="$TESTHOME" ./build/remapper "$TARGET" "$TESTHOME/.dummy*" -- cat "$TESTHOME/.dummy-test/data.txt")
+          echo "Got: $RESULT"
+          [ "$RESULT" = "remapped" ]
+          echo "PASS: remapper works after AppArmor profile installed"

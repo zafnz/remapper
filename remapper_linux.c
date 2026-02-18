@@ -11,6 +11,8 @@
  *
  * Usage:
  *   remapper [--debug-log <file>] <target-dir> <mapping>... -- <program> [args...]
+ *   remapper --install-apparmor
+ *   remapper --install-apparmor-at <path>
  *
  * If '--' is absent, exactly one mapping is expected:
  *   remapper <target-dir> <mapping> <program> [args...]
@@ -19,6 +21,8 @@
  *   remapper ~/v1 '~/.claude*' -- claude
  *   remapper ~/v1 '~/.codex*' codex --model X
  *   remapper --debug-log /tmp/rmp.log ~/v1 '~/.claude*' '~/.config*' -- claude
+ *   sudo remapper --install-apparmor
+ *   sudo remapper --install-apparmor-at /usr/local/bin/remapper
  *
  * Mappings must be single-quoted to prevent shell glob expansion.
  *
@@ -74,6 +78,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <pwd.h>
+#include <sys/wait.h>
 
 /*** Debug logging ********************************/
 
@@ -165,7 +170,9 @@ static void usage(const char *prog) {
         "If '--' is absent, exactly one mapping is expected.\n"
         "\n"
         "Options:\n"
-        "  --debug-log <file>   Log debug output to <file>\n"
+        "  --debug-log <file>          Log debug output to <file>\n"
+        "  --install-apparmor          Install AppArmor profile (requires sudo)\n"
+        "  --install-apparmor-at <p>   Copy binary to <p> and install profile there\n"
         "\n"
         "Examples:\n"
         "  %s ~/v1 '~/.claude*' -- claude\n"
@@ -176,6 +183,226 @@ static void usage(const char *prog) {
         "  RMP_DEBUG_LOG   Log file (enables debug when set)\n",
         prog, prog, prog, prog);
     exit(1);
+}
+
+/*** Namespace restriction detection ***************/
+
+#ifndef APPARMOR_SYSCTL
+#define APPARMOR_SYSCTL  "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+#endif
+#ifndef USERNS_SYSCTL
+#define USERNS_SYSCTL    "/proc/sys/kernel/unprivileged_userns_clone"
+#endif
+#ifndef APPARMOR_DIR
+#define APPARMOR_DIR     "/etc/apparmor.d"
+#endif
+
+// Read a single-byte sysctl value.  Returns the first character, or -1 on error.
+static int read_sysctl_char(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    char buf[8];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    return buf[0];
+}
+
+// Check if AppArmor is restricting unprivileged user namespaces.
+static int is_apparmor_restricting(void) {
+    return read_sysctl_char(APPARMOR_SYSCTL) == '1';
+}
+
+// Check if unprivileged user namespaces are disabled via sysctl.
+// This sysctl exists on Debian/Ubuntu (not upstream Linux).
+static int is_userns_disabled(void) {
+    return read_sysctl_char(USERNS_SYSCTL) == '0';
+}
+
+// Resolve the real path of this binary via /proc/self/exe.
+static int get_self_path(char *buf, size_t bufsize) {
+    ssize_t len = readlink("/proc/self/exe", buf, bufsize - 1);
+    if (len < 0) return -1;
+    buf[len] = '\0';
+    return 0;
+}
+
+// Generate the AppArmor profile filename from a binary path.
+// Convention: replace '/' with '.' and strip the leading dot.
+// e.g. /home/user/.local/bin/remapper → home.user..local.bin.remapper
+static void apparmor_profile_name(const char *binary_path, char *out, size_t outsize) {
+    snprintf(out, outsize, "%s", binary_path + 1);  // skip leading '/'
+    for (char *p = out; *p; p++) {
+        if (*p == '/') *p = '.';
+    }
+}
+
+// Format the AppArmor profile content into buf.
+static void format_apparmor_profile(const char *binary_path, char *buf, size_t bufsize) {
+    snprintf(buf, bufsize,
+        "abi <abi/4.0>,\n"
+        "include <tunables/global>\n"
+        "profile remapper %s flags=(unconfined) {\n"
+        "  userns,\n"
+        "  include if exists <local/remapper>\n"
+        "}\n",
+        binary_path);
+}
+
+// Copy a file preserving permissions.
+static int copy_file(const char *src, const char *dst) {
+    struct stat sb;
+    if (stat(src, &sb) != 0) return -1;
+
+    int sfd = open(src, O_RDONLY);
+    if (sfd < 0) return -1;
+
+    int dfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, sb.st_mode);
+    if (dfd < 0) { close(sfd); return -1; }
+
+    char buf[8192];
+    ssize_t n;
+    while ((n = read(sfd, buf, sizeof(buf))) > 0) {
+        if (write(dfd, buf, (size_t)n) != n) {
+            close(sfd); close(dfd); unlink(dst);
+            return -1;
+        }
+    }
+
+    close(sfd);
+    close(dfd);
+    return (n < 0) ? -1 : 0;
+}
+
+// Install an AppArmor profile for the remapper binary.  Must be run as root.
+//   self_path:  resolved path of this binary
+//   install_at: if non-NULL, copy binary here first, then use this as the profile path
+static int install_apparmor(const char *self_path, const char *install_at) {
+    if (geteuid() != 0) {
+        fprintf(stderr, "remapper: --install-apparmor must be run with sudo\n");
+        return 1;
+    }
+
+    const char *binary_path = self_path;
+
+    if (install_at) {
+        // Ensure parent directory exists
+        char parent[PATH_MAX];
+        snprintf(parent, sizeof(parent), "%s", install_at);
+        char *slash = strrchr(parent, '/');
+        if (slash && slash != parent) {
+            *slash = '\0';
+            mkdirs(parent, 0755);
+        }
+
+        fprintf(stderr, "Copying %s to %s...\n", self_path, install_at);
+        if (copy_file(self_path, install_at) != 0) {
+            fprintf(stderr, "remapper: failed to copy %s to %s: %s\n",
+                    self_path, install_at, strerror(errno));
+            return 1;
+        }
+
+        fprintf(stderr, "Removing %s...\n", self_path);
+        if (unlink(self_path) != 0) {
+            fprintf(stderr, "remapper: warning: failed to remove %s: %s\n",
+                    self_path, strerror(errno));
+        }
+
+        binary_path = install_at;
+    }
+
+    // Resolve to canonical path
+    char real_path[PATH_MAX];
+    if (!realpath(binary_path, real_path)) {
+        fprintf(stderr, "remapper: cannot resolve path %s: %s\n",
+                binary_path, strerror(errno));
+        return 1;
+    }
+
+    // Generate profile
+    char profile[PATH_MAX + 256];
+    format_apparmor_profile(real_path, profile, sizeof(profile));
+
+    // Generate filename
+    char prof_name[PATH_MAX];
+    apparmor_profile_name(real_path, prof_name, sizeof(prof_name));
+
+    char prof_path[PATH_MAX + 32];
+    snprintf(prof_path, sizeof(prof_path), "%s/%s", APPARMOR_DIR, prof_name);
+
+    // Write profile
+    fprintf(stderr, "Writing AppArmor profile to %s...\n", prof_path);
+    FILE *fp = fopen(prof_path, "w");
+    if (!fp) {
+        fprintf(stderr, "remapper: cannot write %s: %s\n", prof_path, strerror(errno));
+        return 1;
+    }
+    fputs(profile, fp);
+    fclose(fp);
+
+    // Load profile
+    fprintf(stderr, "Loading AppArmor profile...\n");
+    char cmd[PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "apparmor_parser -r '%s'", prof_path);
+    int ret = system(cmd);
+    if (ret != 0) {
+        fprintf(stderr, "remapper: apparmor_parser failed (exit %d)\n",
+                WEXITSTATUS(ret));
+        return 1;
+    }
+
+    fprintf(stderr, "\nAppArmor profile installed for %s.\n"
+                    "You can now run remapper normally.\n", real_path);
+    return 0;
+}
+
+// Print AppArmor diagnostic message with instructions for the user.
+static void print_apparmor_help(void) {
+    char self_path[PATH_MAX];
+    if (get_self_path(self_path, sizeof(self_path)) != 0) {
+        fprintf(stderr, "remapper: cannot determine binary path\n");
+        return;
+    }
+
+    char profile[PATH_MAX + 256];
+    format_apparmor_profile(self_path, profile, sizeof(profile));
+
+    fprintf(stderr,
+        "\nremapper: AppArmor is blocking unprivileged user namespaces on this system.\n"
+        "remapper needs an AppArmor profile to allow namespace creation.\n"
+        "\n"
+        "The profile that would be installed in %s/:\n\n",
+        APPARMOR_DIR);
+
+    // Print profile with indentation
+    const char *p = profile;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        if (nl) {
+            fprintf(stderr, "  %.*s\n", (int)(nl - p), p);
+            p = nl + 1;
+        } else {
+            fprintf(stderr, "  %s\n", p);
+            break;
+        }
+    }
+
+    fprintf(stderr,
+        "\n"
+        "To install this profile, run:\n"
+        "\n"
+        "  sudo %s --install-apparmor\n",
+        self_path);
+
+    // If binary is in a home directory, suggest moving to /usr/local/bin
+    if (strncmp(self_path, "/home/", 6) == 0) {
+        fprintf(stderr,
+            "\n"
+            "Or, to move remapper to /usr/local/bin and install the profile there:\n"
+            "\n"
+            "  sudo %s --install-apparmor-at /usr/local/bin/remapper\n",
+            self_path);
+    }
 }
 
 /*** Pattern storage ******************************/
@@ -427,12 +654,29 @@ static int setup_namespace(void) {
     // CLONE_NEWUSER: new user namespace (gives us CAP_SYS_ADMIN inside it)
     // CLONE_NEWNS:   new mount namespace (private mount table)
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) {
+        int saved_errno = errno;
         fprintf(stderr, "remapper: unshare(CLONE_NEWUSER | CLONE_NEWNS) failed: %s\n",
-                strerror(errno));
-        if (errno == EPERM) {
-            fprintf(stderr,
-                "  Unprivileged user namespaces may be disabled on this system.\n"
-                "  Try: sudo sysctl -w kernel.unprivileged_userns_clone=1\n");
+                strerror(saved_errno));
+        if (saved_errno == EPERM) {
+            if (is_apparmor_restricting()) {
+                print_apparmor_help();
+            } else if (is_userns_disabled()) {
+                fprintf(stderr,
+                    "\n"
+                    "Unprivileged user namespaces are disabled on this system.\n"
+                    "To enable them, run:\n"
+                    "\n"
+                    "  sudo sysctl -w kernel.unprivileged_userns_clone=1\n"
+                    "\n"
+                    "To make this permanent, add to /etc/sysctl.d/99-userns.conf:\n"
+                    "\n"
+                    "  kernel.unprivileged_userns_clone=1\n");
+            } else {
+                fprintf(stderr,
+                    "\n"
+                    "Unprivileged user namespaces appear to be disabled on this system.\n"
+                    "This may be a kernel configuration or security policy restriction.\n");
+            }
         }
         return -1;
     }
@@ -454,6 +698,9 @@ static int setup_namespace(void) {
     snprintf(uid_map, sizeof(uid_map), "0 %u 1", uid);
     if (write_file("/proc/self/uid_map", uid_map) != 0) {
         fprintf(stderr, "remapper: failed to write uid_map: %s\n", strerror(errno));
+        if (is_apparmor_restricting()) {
+            print_apparmor_help();
+        }
         return -1;
     }
 
@@ -528,6 +775,28 @@ static int perform_mounts(void) {
 /*** Main *****************************************/
 
 int main(int argc, char **argv) {
+    // Handle --install-apparmor / --install-apparmor-at before normal parsing.
+    if (argc >= 2 && strcmp(argv[1], "--install-apparmor") == 0) {
+        char self_path[PATH_MAX];
+        if (get_self_path(self_path, sizeof(self_path)) != 0) {
+            fprintf(stderr, "remapper: cannot determine binary path\n");
+            return 1;
+        }
+        return install_apparmor(self_path, NULL);
+    }
+    if (argc >= 2 && strcmp(argv[1], "--install-apparmor-at") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "Usage: %s --install-apparmor-at <path>\n", argv[0]);
+            return 1;
+        }
+        char self_path[PATH_MAX];
+        if (get_self_path(self_path, sizeof(self_path)) != 0) {
+            fprintf(stderr, "remapper: cannot determine binary path\n");
+            return 1;
+        }
+        return install_apparmor(self_path, argv[2]);
+    }
+
     char *target;
     const char *debug_log;
     pattern_t patterns[MAX_PATTERNS];
