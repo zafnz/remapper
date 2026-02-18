@@ -41,6 +41,13 @@ $(BUILD)/remapper: remapper_darwin.c $(BUILD)/rmp_shared.o $(BUILD)/interpose.dy
 test: all
 	$(MAKE) -C test -f Makefile.darwin BUILD=$(CURDIR)/$(BUILD)
 	./test/test_darwin.sh
+	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then \
+		echo "=== Docker available — running Linux tests ==="; \
+		$(MAKE) docker-test; \
+		$(MAKE) apparmor-test; \
+	else \
+		echo "=== Docker not available — skipping Linux tests ==="; \
+	fi
 
 else ifeq ($(UNAME_S),Linux)
 
@@ -70,6 +77,27 @@ $(RELEASE)/remapper-$(UNAME_S)-$(UNAME_M): $(BUILD)/remapper | $(RELEASE)
 $(BUILD)/rmp_shared.o: rmp_shared.c $(SHARED_HDR) | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ rmp_shared.c
 
+##############################################################################
+# Docker-based Linux testing (usable from any host with Docker)
+##############################################################################
+
+DOCKER_TEST_IMAGE = remapper-test
+
+docker-image:
+	docker build -q -f Dockerfile.test -t $(DOCKER_TEST_IMAGE) .
+
+docker-test: docker-image
+	@echo "=== Running Linux tests in Docker ==="
+	docker run --rm --privileged -v "$(CURDIR)":/src -w /src $(DOCKER_TEST_IMAGE) \
+		bash -c "make clean && make && make test"
+
+apparmor-test: docker-image
+	@echo "=== Running AppArmor tests in Docker ==="
+	docker run --rm -v "$(CURDIR)":/src -w /src $(DOCKER_TEST_IMAGE) \
+		./test/test_apparmor.sh
+
+##############################################################################
+
 deploy:
 	./deploy-from-macos.sh $(VERSION)
 
@@ -77,4 +105,4 @@ clean:
 	rm -rf $(BUILD)
 	rm -f $(RELEASE)/remapper-$(UNAME_S)-$(UNAME_M)
 
-.PHONY: all clean test deploy
+.PHONY: all clean test deploy docker-image docker-test apparmor-test

@@ -1,0 +1,27 @@
+# Linux test container for remapper
+#
+# Used by Makefile targets:
+#   make docker-test    — build & run basic Linux tests (with --privileged)
+#   make apparmor-test  — build & run AppArmor profile installation tests
+#
+# One image for both: Ubuntu 24.04 with build tools, non-root user, sudo.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    gcc make binutils sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user with passwordless sudo (needed for AppArmor tests)
+RUN useradd -m -s /bin/bash testuser \
+    && echo 'testuser ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/testuser
+
+# AppArmor profile directory (normally installed with apparmor package)
+RUN mkdir -p /etc/apparmor.d
+
+USER testuser
+WORKDIR /src
+
+RUN mkdir -p /home/testuser/.local/bin
