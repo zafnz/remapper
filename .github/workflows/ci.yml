@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest        # Linux x86_64
+          - os: ubuntu-24.04-arm     # Linux aarch64
+          - os: macos-15-intel       # macOS x86_64 (Intel)
+          - os: macos-latest         # macOS arm64 (Apple Silicon)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc make binutils
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Build
+        run: make
+
+      - name: Run tests
+        run: make test
