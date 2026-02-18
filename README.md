@@ -17,7 +17,7 @@ Now `claude-personal` and `claude-work` each get their own separate `~/.claude/`
 curl -fsSL https://github.com/zafnz/remapper/releases/latest/download/install.sh | sh
 ```
 
-For **[Manual Installs](#manual-install)** see below.
+For **[Manual Installs](#manual-installs)** see below.
 
 ## Usage
 
