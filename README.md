@@ -6,7 +6,7 @@ Redirect filesystem paths for any program on **macOS** or **Linux** (WSL2 should
 alias claude-personal='remapper ~/claude-personal "~/.claude*" claude'
 alias claude-work='remapper ~/claude-work "~/.claude*" claude'
 ```
-(Note: you need to use quotes around the glob matches `"~/.codex*"` otherwise zsh/bash will interpret it)
+(Note: you need to use quotes around the glob matches `"~/.claude*"` otherwise zsh/bash will interpret it)
 
 Now `claude-personal` and `claude-work` each get their own separate `~/.claude/` directory, completely independent of each other and the default.
 
