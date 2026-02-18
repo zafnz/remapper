@@ -4,5 +4,4 @@ build/
 release/
 .claude/
 .DS_Store
-
-
+.env
