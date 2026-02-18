@@ -24,19 +24,18 @@
  *
  * Environment variables:
  *   RMP_CONFIG     Base directory (default: ~/.remapper/)
- *   RMP_CACHE      Cache directory (default: $RMP_CONFIG/cache/) [macOS only]
+ *   RMP_CACHE      Cache directory (default: $RMP_CONFIG/cache/)
  *   RMP_DEBUG_LOG  Log file path (enables debug logging when set)
  *   RMP_TARGET     Set by CLI for the interpose library
  *   RMP_MAPPINGS   Set by CLI for the interpose library (colon-separated)
  *
- * The interpose library is embedded inside this binary at build time.
- * On macOS: -sectcreate __DATA __interpose_lib <dylib>
- * On Linux: ld -r -b binary -o interpose_so.o interpose.so
+ * The interpose library is embedded inside this binary at build time
+ * via -sectcreate __DATA __interpose_lib <dylib>.
  *
  * This means `remapper` is a single self-contained binary -- no need to
  * keep the interpose library alongside it.  On first run (or when the
  * embedded version changes), we extract it to $RMP_CONFIG/ so that
- * DYLD_INSERT_LIBRARIES / LD_PRELOAD can load it from disk.
+ * DYLD_INSERT_LIBRARIES can load it from disk.
  */
 
 #include <stdio.h>
@@ -53,7 +52,6 @@
 #include <stdint.h>
 #include "rmp_shared.h"
 
-#ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
 
@@ -63,21 +61,6 @@ extern const struct mach_header_64 _mh_execute_header;
 #define LIB_NAME    "interpose.dylib"
 #define LIB_ENVVAR  "DYLD_INSERT_LIBRARIES"
 
-#else /* Linux */
-
-/*
- * The interpose.so is embedded at build time via ld -r -b binary.
- * The linker creates these symbols automatically from the filename.
- */
-extern const uint8_t _binary_interpose_so_start[];
-extern const uint8_t _binary_interpose_so_end[];
-
-#define LIB_NAME    "interpose.so"
-#define LIB_ENVVAR  "LD_PRELOAD"
-
-#endif
-
-#ifdef __APPLE__
 /*
  * resolve_sip_shebang - handle #!/path/to/interpreter shebangs on macOS
  *
@@ -162,7 +145,6 @@ static int resolve_sip_shebang(rmp_ctx_t *ctx, FILE *debug_fp,
         cmd_resolved, interp);
     return 0;
 }
-#endif /* __APPLE__ */
 
 /*** Helpers ***********************************/
 
@@ -237,9 +219,7 @@ static void usage(const char *prog) {
         "\n"
         "Environment variables:\n"
         "  RMP_CONFIG      Base directory (default: ~/.remapper/)\n"
-#ifdef __APPLE__
         "  RMP_CACHE       Cache directory (default: $RMP_CONFIG/cache/)\n"
-#endif
         "  RMP_DEBUG_LOG   Log file (enables debug when set)\n",
         prog, prog, prog, prog);
     exit(1);
@@ -333,118 +313,62 @@ static int parse_args(int argc, char **argv,
     return cmd_start;
 }
 
-#ifdef __APPLE__
-void darwin_debug_info(rmp_ctx_t *ctx, FILE *debug_fp,  char *lib_path,  char *cmd_to_run) {
+static void darwin_debug_info(rmp_ctx_t *ctx, FILE *debug_fp, const char *lib_path, const char *cmd_to_run) {
+    if (!debug_fp) return;
+
     // Check dylib arch
-    if (debug_fp) {
-        char *file_argv[] = {"file", lib_path, NULL};
-        rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file_argv);
-        if (proc.fp) {
-            char line[1024];
-            if (fgets(line, sizeof(line), proc.fp))
-                fprintf(debug_fp, "[remapper] dylib:    %s", line);
-            rmp_pipe_close(&proc);
-        }
+    const char *file_argv[] = {"file", lib_path, NULL};
+    rmp_pipe_t file_proc = rmp_pipe_open("/usr/bin/file", file_argv);
+    if (file_proc.fp) {
+        char line[1024];
+        if (fgets(line, sizeof(line), file_proc.fp))
+            fprintf(debug_fp, "[remapper] dylib:    %s", line);
+        rmp_pipe_close(&file_proc);
     }
 
     // Resolve the target binary and check its arch/signing
     char resolved_cmd[PATH_MAX] = "";
-    {
-        char *which_argv[] = {"which", cmd_to_run, NULL};
-        rmp_pipe_t proc = rmp_pipe_open("/usr/bin/which", which_argv);
-        if (proc.fp) {
-            if (fgets(resolved_cmd, sizeof(resolved_cmd), proc.fp))
-                resolved_cmd[strcspn(resolved_cmd, "\n")] = '\0';
-            rmp_pipe_close(&proc);
-        }
+    const char *which_argv[] = {"which", cmd_to_run, NULL};
+    rmp_pipe_t which_proc = rmp_pipe_open("/usr/bin/which", which_argv);
+    if (which_proc.fp) {
+        if (fgets(resolved_cmd, sizeof(resolved_cmd), which_proc.fp))
+            resolved_cmd[strcspn(resolved_cmd, "\n")] = '\0';
+        rmp_pipe_close(&which_proc);
     }
-    if (debug_fp && resolved_cmd[0]) {
-        char *file2_argv[] = {"file", resolved_cmd, NULL};
-        rmp_pipe_t proc = rmp_pipe_open("/usr/bin/file", file2_argv);
-        if (proc.fp) {
-            char line[1024];
-            if (fgets(line, sizeof(line), proc.fp))
-                fprintf(debug_fp, "[remapper] binary:   %s", line);
-            rmp_pipe_close(&proc);
-        }
+    if (!resolved_cmd[0]) return;
 
-        char *cs_argv[] = {"codesign", "-dvvv", resolved_cmd, NULL};
-        rmp_pipe_t proc2 = rmp_pipe_open(ctx->codesign_path, cs_argv);
-        if (proc2.fp) {
-            char line[1024];
-            int found_any = 0;
-            while (fgets(line, sizeof(line), proc2.fp)) {
-                if (strstr(line, "runtime") || strstr(line, "Signature")) {
-                    fprintf(debug_fp, "[remapper] codesign: %s", line);
-                    found_any = 1;
-                }
+    const char *file2_argv[] = {"file", resolved_cmd, NULL};
+    rmp_pipe_t file2_proc = rmp_pipe_open("/usr/bin/file", file2_argv);
+    if (file2_proc.fp) {
+        char line[1024];
+        if (fgets(line, sizeof(line), file2_proc.fp))
+            fprintf(debug_fp, "[remapper] binary:   %s", line);
+        rmp_pipe_close(&file2_proc);
+    }
+
+    const char *cs_argv[] = {"codesign", "-dvvv", resolved_cmd, NULL};
+    rmp_pipe_t cs_proc = rmp_pipe_open(ctx->codesign_path, cs_argv);
+    if (cs_proc.fp) {
+        char line[1024];
+        int found_any = 0;
+        while (fgets(line, sizeof(line), cs_proc.fp)) {
+            if (strstr(line, "runtime") || strstr(line, "Signature")) {
+                fprintf(debug_fp, "[remapper] codesign: %s", line);
+                found_any = 1;
             }
-            if (!found_any)
-                fprintf(debug_fp, "[remapper] codesign: not signed\n");
-            rmp_pipe_close(&proc2);
         }
+        if (!found_any)
+            fprintf(debug_fp, "[remapper] codesign: not signed\n");
+        rmp_pipe_close(&cs_proc);
     }
 }
-#endif /* __APPLE__ */
 
-/*** Main **************************************/
+/*** Embedded dylib extraction *****************/
 
-int main(int argc, char **argv) {
-    char *target;
-    char *mappings;
-    const char *debug_log;
-    char *cmd_to_run;
-
-    int cmd_start = parse_args(argc, argv, &target, &mappings, &debug_log);
-    cmd_to_run = argv[cmd_start];
-    /*** Resolve config/cache directories **********/
-
-    char home_pwbuf[1024];
-    const char *home_dir = get_home_dir(home_pwbuf, sizeof(home_pwbuf));
-
-    // RMP_CONFIG defaults to ~/.remapper/
-    char config_dir[PATH_MAX];
-    const char *cfg_env = getenv("RMP_CONFIG");
-    if (cfg_env && cfg_env[0]) {
-        char *abs_cfg = make_absolute(cfg_env);
-        strncpy(config_dir, abs_cfg, sizeof(config_dir) - 1);
-        config_dir[sizeof(config_dir) - 1] = '\0';
-        free(abs_cfg);
-    } else if (home_dir) {
-        snprintf(config_dir, sizeof(config_dir), "%s/.remapper", home_dir);
-    } else {
-        snprintf(config_dir, sizeof(config_dir), "/tmp/.remapper");
-    }
-
-#ifdef __APPLE__
-    // RMP_CACHE defaults to $RMP_CONFIG/cache/
-    char cache_dir[PATH_MAX];
-    const char *cache_env = getenv("RMP_CACHE");
-    if (cache_env && cache_env[0]) {
-        char *abs_cache = make_absolute(cache_env);
-        strncpy(cache_dir, abs_cache, sizeof(cache_dir) - 1);
-        cache_dir[sizeof(cache_dir) - 1] = '\0';
-        free(abs_cache);
-    } else {
-        snprintf(cache_dir, sizeof(cache_dir), "%s/cache", config_dir);
-    }
-#endif
-
-    /*** Extract embedded interpose library ********/
-    //
-    // We extract it to: $RMP_CONFIG/<LIB_NAME>
-    //
-    // We only rewrite the file when:
-    //   - it doesn't exist on disk yet (first run), OR
-    //   - its size differs from the embedded blob (remapper was rebuilt)
-    //
-    // This avoids unnecessary writes on every invocation while ensuring
-    // an updated remapper binary always deploys its matching library.
-
-#ifdef __APPLE__
-    // Read the embedded dylib blob from our own Mach-O section.
-    // getsectiondata() returns a pointer into our already-mapped
-    // executable image -- no allocation or I/O needed.
+// Extract the embedded interpose dylib to config_dir/interpose.dylib.
+// Only rewrites when the on-disk copy is missing or stale (size mismatch).
+// Writes to a temp file and renames into place for atomicity.
+static void extract_dylib(const char *config_dir, char *lib_path, size_t lib_path_size) {
     unsigned long embed_size = 0;
     const uint8_t *embed_data = getsectiondata(
         &_mh_execute_header, "__DATA", "__interpose_lib", &embed_size);
@@ -455,75 +379,98 @@ int main(int argc, char **argv) {
             "  The binary may have been built without -sectcreate.\n");
         exit(1);
     }
-#else
-    // Get the embedded blob pointer and size from linker symbols.
-    const uint8_t *embed_data = _binary_interpose_so_start;
-    unsigned long embed_size =
-        (unsigned long)(_binary_interpose_so_end - _binary_interpose_so_start);
 
-    if (embed_size == 0) {
-        fprintf(stderr,
-            "Error: no embedded " LIB_NAME " found in this binary.\n"
-            "  The binary may have been built without the embed step.\n");
+    snprintf(lib_path, lib_path_size, "%s/" LIB_NAME, config_dir);
+
+    struct stat lib_sb;
+    int need_extract = (stat(lib_path, &lib_sb) != 0 ||
+                        (unsigned long)lib_sb.st_size != embed_size);
+    if (!need_extract) return;
+
+    rmp_mkdirs(config_dir, 0755);
+
+    char lib_tmp[PATH_MAX + 64];
+    snprintf(lib_tmp, sizeof(lib_tmp), "%s.tmp.%d", lib_path, getpid());
+
+    int dfd = open(lib_tmp, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (dfd < 0) {
+        fprintf(stderr, "Error: cannot write %s: %s\n",
+                lib_tmp, strerror(errno));
         exit(1);
     }
-#endif
 
-    // Determine the output path: $RMP_CONFIG/<LIB_NAME>
-    char lib_path[PATH_MAX + 32];
-    snprintf(lib_path, sizeof(lib_path), "%s/" LIB_NAME, config_dir);
-
-    // Check if the on-disk copy is already up to date.
-    // Compare file size against the embedded blob size -- if they
-    // match, the library hasn't changed and we skip the write.
-    int need_extract = 0;
-    struct stat lib_sb;
-    if (stat(lib_path, &lib_sb) != 0) {
-        need_extract = 1;
-    } else if ((unsigned long)lib_sb.st_size != embed_size) {
-        need_extract = 1;
-    }
-
-    // Write the embedded library to disk if needed.
-    // We write to a temp file and rename() into place so that
-    // a concurrent remapper invocation never sees a half-written
-    // library (rename is atomic on the same filesystem).
-    if (need_extract) {
-        rmp_mkdirs(config_dir, 0755);
-
-        char lib_tmp[PATH_MAX + 64];
-        snprintf(lib_tmp, sizeof(lib_tmp), "%s.tmp.%d", lib_path, getpid());
-
-        int dfd = open(lib_tmp, O_CREAT | O_WRONLY | O_TRUNC, 0755);
-        if (dfd < 0) {
-            fprintf(stderr, "Error: cannot write %s: %s\n",
+    const uint8_t *p = embed_data;
+    unsigned long remaining = embed_size;
+    while (remaining > 0) {
+        ssize_t written = write(dfd, p, remaining);
+        if (written <= 0) {
+            fprintf(stderr, "Error: write to %s failed: %s\n",
                     lib_tmp, strerror(errno));
-            exit(1);
-        }
-
-        const uint8_t *p = embed_data;
-        unsigned long remaining = embed_size;
-        while (remaining > 0) {
-            ssize_t written = write(dfd, p, remaining);
-            if (written <= 0) {
-                fprintf(stderr, "Error: write to %s failed: %s\n",
-                        lib_tmp, strerror(errno));
-                close(dfd);
-                unlink(lib_tmp);
-                exit(1);
-            }
-            p += written;
-            remaining -= (unsigned long)written;
-        }
-        close(dfd);
-
-        if (rename(lib_tmp, lib_path) != 0) {
-            fprintf(stderr, "Error: cannot install %s: %s\n",
-                    lib_path, strerror(errno));
+            close(dfd);
             unlink(lib_tmp);
             exit(1);
         }
+        p += written;
+        remaining -= (unsigned long)written;
     }
+    close(dfd);
+
+    if (rename(lib_tmp, lib_path) != 0) {
+        fprintf(stderr, "Error: cannot install %s: %s\n",
+                lib_path, strerror(errno));
+        unlink(lib_tmp);
+        exit(1);
+    }
+}
+
+/*** Resolve config/cache directories **********/
+
+static void resolve_dirs(char *config_dir, size_t config_size,
+                         char *cache_dir, size_t cache_size) {
+    char home_pwbuf[1024];
+    const char *home_dir = get_home_dir(home_pwbuf, sizeof(home_pwbuf));
+
+    // RMP_CONFIG defaults to ~/.remapper/
+    const char *cfg_env = getenv("RMP_CONFIG");
+    if (cfg_env && cfg_env[0]) {
+        char *abs_cfg = make_absolute(cfg_env);
+        strncpy(config_dir, abs_cfg, config_size - 1);
+        config_dir[config_size - 1] = '\0';
+        free(abs_cfg);
+    } else if (home_dir) {
+        snprintf(config_dir, config_size, "%s/.remapper", home_dir);
+    } else {
+        snprintf(config_dir, config_size, "/tmp/.remapper");
+    }
+
+    // RMP_CACHE defaults to $RMP_CONFIG/cache/
+    const char *cache_env = getenv("RMP_CACHE");
+    if (cache_env && cache_env[0]) {
+        char *abs_cache = make_absolute(cache_env);
+        strncpy(cache_dir, abs_cache, cache_size - 1);
+        cache_dir[cache_size - 1] = '\0';
+        free(abs_cache);
+    } else {
+        snprintf(cache_dir, cache_size, "%s/cache", config_dir);
+    }
+}
+
+/*** Main **************************************/
+
+int main(int argc, char **argv) {
+    char *target;
+    char *mappings;
+    const char *debug_log;
+
+    int cmd_start = parse_args(argc, argv, &target, &mappings, &debug_log);
+    char *cmd_to_run = argv[cmd_start];
+
+    char config_dir[PATH_MAX];
+    char cache_dir[PATH_MAX];
+    resolve_dirs(config_dir, sizeof(config_dir), cache_dir, sizeof(cache_dir));
+
+    char lib_path[PATH_MAX + 32];
+    extract_dylib(config_dir, lib_path, sizeof(lib_path));
 
     // Open debug log
     FILE *debug_fp = NULL;
@@ -532,7 +479,6 @@ int main(int argc, char **argv) {
         if (!debug_fp) debug_fp = stderr;
     }
 
-#ifdef __APPLE__
     // Initialize shared context (resolves codesign, creates dirs, writes entitlements)
     rmp_ctx_t ctx;
     rmp_ctx_init(&ctx, config_dir, cache_dir, debug_fp);
@@ -541,33 +487,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error: cannot find 'codesign' in PATH\n");
         exit(1);
     }
-#endif
 
     /*** Set environment variables *****************/
 
     setenv("RMP_TARGET", target, 1);
     setenv("RMP_MAPPINGS", mappings, 1);
-
-#ifdef __APPLE__
     setenv("DYLD_INSERT_LIBRARIES", lib_path, 1);
     setenv("RMP_CACHE", cache_dir, 1);
-#else
-    // LD_PRELOAD: prepend our .so to any existing value
-    const char *existing_preload = getenv("LD_PRELOAD");
-    if (existing_preload && existing_preload[0]) {
-        char preload_buf[PATH_MAX * 2];
-        snprintf(preload_buf, sizeof(preload_buf), "%s:%s", lib_path, existing_preload);
-        setenv("LD_PRELOAD", preload_buf, 1);
-    } else {
-        setenv("LD_PRELOAD", lib_path, 1);
-    }
-#endif
-
     setenv("RMP_CONFIG", config_dir, 1);
-
-    if (debug_log) {
+    if (debug_log)
         setenv("RMP_DEBUG_LOG", debug_log, 1);
-    }
 
     /*** Debug output ******************************/
 
@@ -575,34 +504,22 @@ int main(int argc, char **argv) {
         fprintf(debug_fp, "[remapper] target:   %s\n", target);
         fprintf(debug_fp, "[remapper] mappings: %s\n", mappings);
         fprintf(debug_fp, "[remapper] config:   %s\n", config_dir);
-#ifdef __APPLE__
         fprintf(debug_fp, "[remapper] cache:    %s\n", cache_dir);
         fprintf(debug_fp, "[remapper] dylib:    %s\n", lib_path);
         fprintf(debug_fp, "[remapper] codesign: %s\n", ctx.codesign_path);
-#else
-        fprintf(debug_fp, "[remapper] so:       %s\n", lib_path);
-#endif
         fprintf(debug_fp, "[remapper] command: ");
         for (int i = cmd_start; i < argc; i++)
             fprintf(debug_fp, " %s", argv[i]);
         fprintf(debug_fp, "\n");
-    
-#ifdef __APPLE__
         darwin_debug_info(&ctx, debug_fp, lib_path, cmd_to_run);
-
-#endif /* __APPLE__ */
-
         fflush(debug_fp);
     }
 
     /*** Shebang resolution ************************/
     //
     // If the command is a script with #!/usr/bin/env <prog>, resolve it
-    // so we exec the interpreter directly.
-    //
-    // On macOS this is critical: SIP will strip DYLD_INSERT_LIBRARIES
-    // when /usr/bin/env runs.  On Linux it's useful for debug logging
-    // to show the real interpreter path.
+    // so we exec the interpreter directly.  This is critical: SIP will
+    // strip DYLD_INSERT_LIBRARIES when /usr/bin/env runs.
 
     // Resolve the command to a full (absolute) path
     char cmd_resolved[PATH_MAX] = "";
@@ -692,19 +609,16 @@ int main(int argc, char **argv) {
                         }
                     }
                 }
-#ifdef __APPLE__
                 // #!/path/to/interpreter — if SIP-protected or hardened, copy+re-sign
                 else {
                     use_rewritten = resolve_sip_shebang(
                         &ctx, debug_fp, interp, cmd_resolved,
                         exec_argv, argc, argv, cmd_start);
                 }
-#endif /* __APPLE__ */
             }
         }
     }
 
-#ifdef __APPLE__
     /*** Hardened binary check *********************/
     //
     // If the binary to exec has hardened runtime without the
@@ -737,7 +651,6 @@ int main(int argc, char **argv) {
             }
         }
     }
-#endif /* __APPLE__ */
 
     // Exec the command
     if (use_rewritten) {

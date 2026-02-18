@@ -29,13 +29,13 @@ ifeq ($(UNAME_S),Darwin)
 
 all: $(BUILD)/interpose.dylib $(BUILD)/remapper $(RELEASE)/remapper-$(UNAME_S)-$(UNAME_M)
 
-INTERPOSE_SRC = interpose.c interpose_fs_darwin.c interpose_exec_darwin.c
+INTERPOSE_SRC = interpose.c interpose_fs.c interpose_exec.c
 
 $(BUILD)/interpose.dylib: $(INTERPOSE_SRC) $(INTERPOSE_HDR) $(BUILD)/rmp_shared.o | $(BUILD)
 	$(CC) $(CFLAGS) -dynamiclib -o $@ $(INTERPOSE_SRC) $(BUILD)/rmp_shared.o
 
-$(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose.dylib $(SHARED_HDR) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ remapper.c $(BUILD)/rmp_shared.o \
+$(BUILD)/remapper: remapper_darwin.c $(BUILD)/rmp_shared.o $(BUILD)/interpose.dylib $(SHARED_HDR) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ remapper_darwin.c $(BUILD)/rmp_shared.o \
 		-Wl,-sectcreate,__DATA,__interpose_lib,$(BUILD)/interpose.dylib
 
 test: all
@@ -46,26 +46,10 @@ else ifeq ($(UNAME_S),Linux)
 
 all: $(BUILD)/remapper $(RELEASE)/remapper-$(UNAME_S)-$(UNAME_M)
 
-INTERPOSE_SRC_LINUX = interpose.c interpose_fs_linux.c interpose_exec_linux.c
-
-# Build the shared library (intermediate artifact — will be embedded)
-$(BUILD)/interpose.so: $(INTERPOSE_SRC_LINUX) $(INTERPOSE_HDR) $(BUILD)/rmp_shared.o | $(BUILD)
-	$(CC) $(CFLAGS) -shared -fPIC -o $@ $(INTERPOSE_SRC_LINUX) $(BUILD)/rmp_shared.o -ldl
-
-# Wrap interpose.so into a relocatable object so it can be linked into remapper.
-# This creates symbols: _binary_interpose_so_start, _binary_interpose_so_end
-$(BUILD)/interpose_so.o: $(BUILD)/interpose.so | $(BUILD)
-	cd $(BUILD) && ld -r -b binary -o interpose_so.o interpose.so
-
-# Embed interpose.so into the remapper binary.
-# At runtime, remapper reads _binary_interpose_so_start/end and writes
-# the .so out to $RMP_CONFIG/interpose.so on first run (or when stale).
-# This means the user only needs to distribute/install a single file.
-$(BUILD)/remapper: remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose_so.o $(SHARED_HDR) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ remapper.c $(BUILD)/rmp_shared.o $(BUILD)/interpose_so.o
+$(BUILD)/remapper: remapper_linux.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ remapper_linux.c
 
 test: all
-	$(MAKE) -C test -f Makefile.linux BUILD=$(CURDIR)/$(BUILD)
 	./test/test_linux.sh
 
 endif

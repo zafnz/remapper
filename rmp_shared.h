@@ -24,15 +24,14 @@ typedef struct {
 } rmp_pipe_t;
 
 // Spawn a child process. Returns .fp=NULL on failure.
-rmp_pipe_t rmp_pipe_open(const char *path, char *const argv[]);
+rmp_pipe_t rmp_pipe_open(const char *path, const char *const argv[]);
 
 // Close pipe and wait for child. Returns exit status, or -1 on error.
 int rmp_pipe_close(rmp_pipe_t *proc);
 
-/*** macOS-only: hardened binary cache ************/
-#ifdef __APPLE__
+/*** Hardened binary cache *************************/
 
-// Context for cache operations (macOS only — codesign + entitlements)
+// Context for cache operations (codesign + entitlements)
 typedef struct {
     char cache_dir[PATH_MAX];
     char config_dir[PATH_MAX];
@@ -70,7 +69,5 @@ int rmp_cache_create(rmp_ctx_t *ctx, const char *original,
 // If a new string is returned, caller must free() it.
 // Sets *was_cached = 1 if the returned path is a cached copy.
 const char *rmp_resolve_hardened(rmp_ctx_t *ctx, const char *path, int *was_cached);
-
-#endif /* __APPLE__ */
 
 #endif // RMP_SHARED_H
